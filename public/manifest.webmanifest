@@ -1,0 +1,16 @@
+{
+  "name": "Gas-Zero · Medidor Inteligente de Gases",
+  "short_name": "Gas-Zero",
+  "description": "Monitoreo en tiempo real de cilindros de gas con báscula IoT ESP32 + HX711",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09080F",
+  "theme_color": "#0C0A13",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
