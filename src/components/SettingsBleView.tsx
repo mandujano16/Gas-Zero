@@ -1,6 +1,23 @@
-import { useState, type FormEvent } from 'react';
-import { Bluetooth, BluetoothOff, Check, Cpu, Radio, Sliders } from 'lucide-react';
-import type { AlertThresholds, ConnectionStatus, DataSourceMode } from '../types/gas';
+import { useEffect, useState, type FormEvent } from 'react';
+import {
+  Bell,
+  BellRing,
+  Bluetooth,
+  BluetoothOff,
+  Check,
+  Cpu,
+  Radio,
+  RotateCcw,
+  Sliders,
+  Volume2,
+} from 'lucide-react';
+import type {
+  AlertLevel,
+  AlertPreferences,
+  AlertThresholds,
+  ConnectionStatus,
+  DataSourceMode,
+} from '../types/gas';
 
 interface SettingsBleViewProps {
   mode: DataSourceMode;
@@ -9,16 +26,23 @@ interface SettingsBleViewProps {
   bleDeviceName: string | null;
   bleSupported: boolean;
   cylinderLabel: string;
+  cylinderLocation: string;
   thresholds: AlertThresholds;
+  alerts: AlertPreferences;
+  notificationPermission: NotificationPermission | 'unsupported';
   serviceUuid: string;
   telemetryUuid: string;
   commandUuid: string;
   onConnectBle: () => void;
   onDisconnectBle: () => void;
   onSwitchToSimulator: () => void;
-  onUpdateCylinderLabel: (label: string) => void;
+  onUpdateCylinderMeta: (label: string, location: string) => void;
   onUpdateThresholds: (thresholds: AlertThresholds) => void;
+  onToggleSoundAlerts: () => void;
+  onToggleBrowserNotifications: () => void;
+  onTestAlert: (level: Exclude<AlertLevel, 'ok'>) => void;
   onUpdateBleUuids: (service: string, telemetry: string, command: string) => void;
+  onResetAllData: () => void;
 }
 
 export function SettingsBleView({
@@ -28,18 +52,26 @@ export function SettingsBleView({
   bleDeviceName,
   bleSupported,
   cylinderLabel,
+  cylinderLocation,
   thresholds,
+  alerts,
+  notificationPermission,
   serviceUuid,
   telemetryUuid,
   commandUuid,
   onConnectBle,
   onDisconnectBle,
   onSwitchToSimulator,
-  onUpdateCylinderLabel,
+  onUpdateCylinderMeta,
   onUpdateThresholds,
+  onToggleSoundAlerts,
+  onToggleBrowserNotifications,
+  onTestAlert,
   onUpdateBleUuids,
+  onResetAllData,
 }: SettingsBleViewProps) {
   const [labelDraft, setLabelDraft] = useState(cylinderLabel);
+  const [locationDraft, setLocationDraft] = useState(cylinderLocation);
   const [warnDraft, setWarnDraft] = useState(thresholds.warnPct);
   const [dangerDraft, setDangerDraft] = useState(thresholds.dangerPct);
   const [svcDraft, setSvcDraft] = useState(serviceUuid);
@@ -47,9 +79,14 @@ export function SettingsBleView({
   const [cmdDraft, setCmdDraft] = useState(commandUuid);
   const [savedFlag, setSavedFlag] = useState(false);
 
+  useEffect(() => {
+    setLabelDraft(cylinderLabel);
+    setLocationDraft(cylinderLocation);
+  }, [cylinderLabel, cylinderLocation]);
+
   const handleSaveSettings = (e: FormEvent) => {
     e.preventDefault();
-    onUpdateCylinderLabel(labelDraft);
+    onUpdateCylinderMeta(labelDraft, locationDraft);
     onUpdateThresholds({ warnPct: warnDraft, dangerPct: dangerDraft });
     onUpdateBleUuids(svcDraft, telDraft, cmdDraft);
     setSavedFlag(true);
@@ -62,9 +99,11 @@ export function SettingsBleView({
         <div className="gz-panel-head">
           <div className="gz-title-icon">
             <Bluetooth size={16} />
-            <h2>Fuente de datos (BLE / Simulador)</h2>
+            <h2>Modo de operación (Demo vs Hardware BLE)</h2>
           </div>
-          <span className="gz-mono-pill">{mode === 'ble' ? 'MODO HARDWARE BLE' : 'MODO SIMULADOR'}</span>
+          <span className="gz-mono-pill">
+            {mode === 'ble' ? 'MODO HARDWARE BLE' : 'MODO DEMO / SIMULADOR'}
+          </span>
         </div>
 
         <p className="gz-subcopy">
@@ -75,7 +114,8 @@ export function SettingsBleView({
         {!bleSupported && (
           <div className="gz-alert gz-alert--warn">
             <span>
-              Este navegador no expone Web Bluetooth API. Para enlazar el ESP32 físico usa Chrome o Edge en Windows, macOS o Android (en HTTPS o localhost).
+              Este navegador no expone Web Bluetooth API. Para enlazar el ESP32 físico usa Chrome o
+              Edge en Windows, macOS o Android (en HTTPS o localhost).
             </span>
           </div>
         )}
@@ -105,9 +145,77 @@ export function SettingsBleView({
           {mode === 'ble' && (
             <button type="button" className="gz-btn gz-btn--subtle" onClick={onSwitchToSimulator}>
               <Radio size={15} />
-              <span>Volver a modo simulador</span>
+              <span>Volver a Modo Demo</span>
             </button>
           )}
+        </div>
+      </section>
+
+      {/* Alertas reales: sonido y notificaciones */}
+      <section className="gz-panel">
+        <div className="gz-panel-head">
+          <div className="gz-title-icon">
+            <Bell size={16} />
+            <h2>Alertas sonoras y notificaciones del dispositivo</h2>
+          </div>
+        </div>
+
+        <div className="gz-toggle-list">
+          <div className="gz-toggle-row">
+            <div>
+              <strong>Alerta sonora automática</strong>
+              <p className="gz-subcopy">
+                Reproduce un aviso acústico al cruzar el umbral bajo o crítico.
+              </p>
+            </div>
+            <button
+              type="button"
+              className={`gz-switch ${alerts.soundEnabled ? 'is-on' : ''}`}
+              role="switch"
+              aria-checked={alerts.soundEnabled}
+              onClick={onToggleSoundAlerts}
+            >
+              <span />
+            </button>
+          </div>
+
+          <div className="gz-toggle-row">
+            <div>
+              <strong>Notificaciones del navegador</strong>
+              <p className="gz-subcopy">
+                {notificationPermission === 'unsupported'
+                  ? 'No soportado en este navegador.'
+                  : notificationPermission === 'denied'
+                  ? 'Permiso bloqueado en el navegador (actívalo desde el candado de la URL).'
+                  : 'Muestra alertas incluso si cambias de pestaña.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className={`gz-switch ${alerts.browserNotificationsEnabled ? 'is-on' : ''}`}
+              role="switch"
+              aria-checked={alerts.browserNotificationsEnabled}
+              disabled={notificationPermission === 'unsupported'}
+              onClick={onToggleBrowserNotifications}
+            >
+              <span />
+            </button>
+          </div>
+        </div>
+
+        <div className="gz-sim-btns">
+          <button type="button" className="gz-mini-btn" onClick={() => onTestAlert('warn')}>
+            <Volume2 size={13} />
+            Probar alerta nivel bajo
+          </button>
+          <button
+            type="button"
+            className="gz-mini-btn gz-mini-btn--warn"
+            onClick={() => onTestAlert('danger')}
+          >
+            <BellRing size={13} />
+            Probar alerta crítica
+          </button>
         </div>
       </section>
 
@@ -115,21 +223,33 @@ export function SettingsBleView({
         <div className="gz-panel-head">
           <div className="gz-title-icon">
             <Sliders size={16} />
-            <h2>Cilindro y alertas de umbral</h2>
+            <h2>Cilindro activo y umbrales</h2>
           </div>
         </div>
 
-        <div className="gz-form-grid">
+        <div className="gz-form-grid-2">
           <label className="gz-field">
             <span>Nombre / ID del cilindro</span>
             <input
               type="text"
               value={labelDraft}
               onChange={(e) => setLabelDraft(e.target.value)}
-              placeholder="Ej. Cilindro #001 · Taller"
+              placeholder="Ej. Cilindro #001"
             />
           </label>
 
+          <label className="gz-field">
+            <span>Ubicación / estación</span>
+            <input
+              type="text"
+              value={locationDraft}
+              onChange={(e) => setLocationDraft(e.target.value)}
+              placeholder="Ej. Taller principal"
+            />
+          </label>
+        </div>
+
+        <div className="gz-form-grid-2">
           <label className="gz-field">
             <span>Alerta nivel bajo (%)</span>
             <input
@@ -199,7 +319,16 @@ export function SettingsBleView({
           <code>{'{"weight":32.0, "tare":12.0, "net":20.0, "pct":100, "gas":"N2"}'}</code>
         </div>
 
-        <div className="gz-form-footer">
+        <div className="gz-form-footer gz-form-footer--split">
+          <button
+            type="button"
+            className="gz-mini-btn gz-mini-btn--warn"
+            onClick={onResetAllData}
+          >
+            <RotateCcw size={13} />
+            Restablecer datos locales
+          </button>
+
           <button type="submit" className="gz-btn">
             {savedFlag ? <Check size={16} /> : null}
             <span>{savedFlag ? 'Configuración guardada' : 'Guardar configuración'}</span>

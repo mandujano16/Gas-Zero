@@ -2,7 +2,7 @@ export type GasCode = 'N2' | 'Ar' | 'CO2' | 'O2' | 'LP';
 
 export type TankPresetId = 'small' | 'medium' | 'large' | 'industrial' | 'custom';
 
-export type NavTab = 'inicio' | 'historial' | 'ahorrar' | 'conexion';
+export type NavTab = 'inicio' | 'flota' | 'historial' | 'ahorrar' | 'conexion';
 
 export type DataSourceMode = 'simulator' | 'ble';
 
@@ -67,4 +67,40 @@ export interface LogEntry {
 export interface AlertThresholds {
   warnPct: number;
   dangerPct: number;
+}
+
+export interface AlertPreferences {
+  soundEnabled: boolean;
+  browserNotificationsEnabled: boolean;
+}
+
+export interface CylinderState {
+  id: string;
+  label: string;
+  location: string;
+  gasCode: GasCode;
+  tankPresetId: TankPresetId;
+  capacityKg: number;
+  tareKg: number;
+  weightKg: number;
+  netKg: number;
+  pct: number;
+  consumedSessionKg: number;
+  refillCount: number;
+  monitoredHours: number;
+  lastRawJson: string;
+  history: HistoryReading[];
+  events: GasEvent[];
+  warnNotified: boolean;
+  dangerNotified: boolean;
+  updatedAt: number;
+}
+
+export interface NewCylinderInput {
+  label: string;
+  location: string;
+  gasCode: GasCode;
+  tankPresetId: TankPresetId;
+  capacityKg: number;
+  tareKg: number;
 }

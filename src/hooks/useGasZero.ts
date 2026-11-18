@@ -1,65 +1,61 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GAS_ZERO_BLE } from '../constants/ble';
 import { GAS_CATALOG, TANK_PRESETS } from '../constants/gases';
+import {
+  getNotificationPermission,
+  playAlertChime,
+  requestBrowserNotificationPermission,
+  sendBrowserNotification,
+} from '../services/alertService';
 import { GasZeroBleClient, isWebBluetoothSupported } from '../services/bleService';
 import type {
   AlertLevel,
+  AlertPreferences,
   AlertThresholds,
   ConnectionStatus,
+  CylinderState,
   DataSourceMode,
   Esp32TelemetryPayload,
   GasCode,
   GasEvent,
-  HistoryReading,
   LogEntry,
+  NewCylinderInput,
   TankPresetId,
 } from '../types/gas';
 
-const STORAGE_KEY = 'gas-zero-config-v1';
+const STORAGE_V2_KEY = 'gas-zero-state-v2';
+const LEGACY_V1_KEY = 'gas-zero-config-v1';
 
-interface StoredConfig {
-  cylinderLabel: string;
-  gasCode: GasCode;
-  tankPresetId: TankPresetId;
-  capacityKg: number;
-  tareKg: number;
+interface PersistedSettings {
   thresholds: AlertThresholds;
+  alerts: AlertPreferences;
   serviceUuid: string;
   telemetryUuid: string;
   commandUuid: string;
 }
 
-const DEFAULT_CONFIG: StoredConfig = {
-  cylinderLabel: 'Cilindro #001',
-  gasCode: 'N2',
-  tankPresetId: 'medium',
-  capacityKg: 20,
-  tareKg: 12,
+interface PersistedStore {
+  activeCylinderId: string;
+  cylinders: CylinderState[];
+  settings: PersistedSettings;
+}
+
+const DEFAULT_SETTINGS: PersistedSettings = {
   thresholds: {
     warnPct: 15,
     dangerPct: 5,
+  },
+  alerts: {
+    soundEnabled: true,
+    browserNotificationsEnabled: false,
   },
   serviceUuid: GAS_ZERO_BLE.SERVICE_UUID,
   telemetryUuid: GAS_ZERO_BLE.TELEMETRY_CHAR_UUID,
   commandUuid: GAS_ZERO_BLE.COMMAND_CHAR_UUID,
 };
 
-function loadConfig(): StoredConfig {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_CONFIG;
-    const parsed = JSON.parse(raw) as Partial<StoredConfig>;
-    return {
-      ...DEFAULT_CONFIG,
-      ...parsed,
-      thresholds: {
-        ...DEFAULT_CONFIG.thresholds,
-        ...(parsed.thresholds ?? {}),
-      },
-    };
-  } catch {
-    return DEFAULT_CONFIG;
-  }
+function makeId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function formatElapsed(startMs: number): string {
@@ -69,87 +65,211 @@ function formatElapsed(startMs: number): string {
   return `${mm}:${ss}`;
 }
 
-function makeId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+export function getAlertLevel(pct: number, thresholds: AlertThresholds): AlertLevel {
+  if (pct <= thresholds.dangerPct) return 'danger';
+  if (pct <= thresholds.warnPct) return 'warn';
+  return 'ok';
+}
+
+function createCylinder(input: NewCylinderInput, initialPct = 100): CylinderState {
+  const now = Date.now();
+  const safePct = Math.min(100, Math.max(0, Math.round(initialPct)));
+  const netKg = Number(((input.capacityKg * safePct) / 100).toFixed(2));
+  const weightKg = Number((input.tareKg + netKg).toFixed(2));
+  const payload: Esp32TelemetryPayload = {
+    weight: weightKg,
+    tare: input.tareKg,
+    net: netKg,
+    pct: safePct,
+    gas: input.gasCode,
+  };
+
+  return {
+    id: makeId(),
+    label: input.label.trim() || 'Cilindro #001',
+    location: input.location.trim() || 'Área principal',
+    gasCode: input.gasCode,
+    tankPresetId: input.tankPresetId,
+    capacityKg: input.capacityKg,
+    tareKg: input.tareKg,
+    weightKg,
+    netKg,
+    pct: safePct,
+    consumedSessionKg: Number((input.capacityKg - netKg).toFixed(2)),
+    refillCount: 0,
+    monitoredHours: 0,
+    lastRawJson: JSON.stringify(payload),
+    history: [
+      {
+        id: makeId(),
+        timestamp: now,
+        weightKg,
+        netKg,
+        pct: safePct,
+        gas: input.gasCode,
+      },
+    ],
+    events: [
+      {
+        id: makeId(),
+        timestamp: now,
+        type: 'config',
+        message: `Cilindro creado — ${GAS_CATALOG[input.gasCode].name} · ${input.capacityKg.toFixed(0)} kg`,
+      },
+    ],
+    warnNotified: false,
+    dangerNotified: false,
+    updatedAt: now,
+  };
+}
+
+function buildDefaultStore(): PersistedStore {
+  // Migrar configuración v1 si el usuario ya había usado la versión anterior
+  try {
+    const legacyRaw = localStorage.getItem(LEGACY_V1_KEY);
+    if (legacyRaw) {
+      const legacy = JSON.parse(legacyRaw) as {
+        cylinderLabel?: string;
+        gasCode?: GasCode;
+        tankPresetId?: TankPresetId;
+        capacityKg?: number;
+        tareKg?: number;
+        thresholds?: AlertThresholds;
+        serviceUuid?: string;
+        telemetryUuid?: string;
+        commandUuid?: string;
+      };
+      const primary = createCylinder({
+        label: legacy.cylinderLabel ?? 'Cilindro #001',
+        location: 'Estación principal',
+        gasCode: legacy.gasCode ?? 'N2',
+        tankPresetId: legacy.tankPresetId ?? 'medium',
+        capacityKg: legacy.capacityKg ?? 20,
+        tareKg: legacy.tareKg ?? 12,
+      });
+      return {
+        activeCylinderId: primary.id,
+        cylinders: [primary],
+        settings: {
+          ...DEFAULT_SETTINGS,
+          thresholds: legacy.thresholds ?? DEFAULT_SETTINGS.thresholds,
+          serviceUuid: legacy.serviceUuid ?? DEFAULT_SETTINGS.serviceUuid,
+          telemetryUuid: legacy.telemetryUuid ?? DEFAULT_SETTINGS.telemetryUuid,
+          commandUuid: legacy.commandUuid ?? DEFAULT_SETTINGS.commandUuid,
+        },
+      };
+    }
+  } catch {
+    // Continuar con valores por defecto
+  }
+
+  const c1 = createCylinder(
+    {
+      label: 'Cilindro #001',
+      location: 'Taller principal',
+      gasCode: 'N2',
+      tankPresetId: 'medium',
+      capacityKg: 20,
+      tareKg: 12,
+    },
+    100
+  );
+  const c2 = createCylinder(
+    {
+      label: 'Cilindro #002',
+      location: 'Zona soldadura',
+      gasCode: 'Ar',
+      tankPresetId: 'large',
+      capacityKg: 30,
+      tareKg: 22,
+    },
+    68
+  );
+
+  return {
+    activeCylinderId: c1.id,
+    cylinders: [c1, c2],
+    settings: DEFAULT_SETTINGS,
+  };
+}
+
+function loadStore(): PersistedStore {
+  try {
+    const raw = localStorage.getItem(STORAGE_V2_KEY);
+    if (!raw) return buildDefaultStore();
+    const parsed = JSON.parse(raw) as Partial<PersistedStore>;
+    if (!Array.isArray(parsed.cylinders) || parsed.cylinders.length === 0) {
+      return buildDefaultStore();
+    }
+    const activeExists = parsed.cylinders.some((c) => c.id === parsed.activeCylinderId);
+    return {
+      activeCylinderId: activeExists
+        ? (parsed.activeCylinderId as string)
+        : parsed.cylinders[0].id,
+      cylinders: parsed.cylinders,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...(parsed.settings ?? {}),
+        thresholds: {
+          ...DEFAULT_SETTINGS.thresholds,
+          ...(parsed.settings?.thresholds ?? {}),
+        },
+        alerts: {
+          ...DEFAULT_SETTINGS.alerts,
+          ...(parsed.settings?.alerts ?? {}),
+        },
+      },
+    };
+  } catch {
+    return buildDefaultStore();
+  }
 }
 
 export function useGasZero() {
-  const initialConfig = useMemo(() => loadConfig(), []);
   const sessionStartRef = useRef<number>(Date.now());
   const bleClientRef = useRef<GasZeroBleClient | null>(null);
-  const warnNotifiedRef = useRef<boolean>(false);
-  const dangerNotifiedRef = useRef<boolean>(false);
 
-  const [config, setConfig] = useState<StoredConfig>(initialConfig);
+  const [store, setStore] = useState<PersistedStore>(() => loadStore());
   const [mode, setMode] = useState<DataSourceMode>('simulator');
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connecting');
-  const [connectionDetail, setConnectionDetail] = useState<string>('Iniciando simulador ESP32…');
-  const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
-
-  const [simRunning, setSimRunning] = useState<boolean>(true);
-  const [simSpeed, setSimSpeed] = useState<'normal' | 'fast'>('normal');
-
-  const initialFullWeight = Number((initialConfig.tareKg + initialConfig.capacityKg).toFixed(2));
-  const [weightKg, setWeightKg] = useState<number>(initialFullWeight);
-  const [netKg, setNetKg] = useState<number>(initialConfig.capacityKg);
-  const [pct, setPct] = useState<number>(100);
-  const [consumedSessionKg, setConsumedSessionKg] = useState<number>(0);
-  const [refillCount, setRefillCount] = useState<number>(0);
-  const [simElapsedHours, setSimElapsedHours] = useState<number>(0);
-
-  const [lastRawJson, setLastRawJson] = useState<string>(() =>
-    JSON.stringify({
-      weight: initialFullWeight,
-      tare: initialConfig.tareKg,
-      net: initialConfig.capacityKg,
-      pct: 100,
-      gas: initialConfig.gasCode,
-    })
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('connected');
+  const [connectionDetail, setConnectionDetail] = useState<string>(
+    'Modo Demo activo · Sin hardware físico'
   );
+  const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => getNotificationPermission());
 
-  const [history, setHistory] = useState<HistoryReading[]>(() => [
-    {
-      id: makeId(),
-      timestamp: Date.now(),
-      weightKg: initialFullWeight,
-      netKg: initialConfig.capacityKg,
-      pct: 100,
-      gas: initialConfig.gasCode,
-    },
-  ]);
-
-  const [events, setEvents] = useState<GasEvent[]>(() => [
-    {
-      id: makeId(),
-      timestamp: Date.now(),
-      type: 'config',
-      message: `Cilindro configurado — ${GAS_CATALOG[initialConfig.gasCode].name} · ${initialConfig.capacityKg.toFixed(0)} kg`,
-    },
-  ]);
+  // Consumo automático PAUSADO por defecto para que el nivel no baje solo sin aviso
+  const [simAutoConsume, setSimAutoConsume] = useState<boolean>(false);
+  const [simSpeed, setSimSpeed] = useState<'normal' | 'fast'>('normal');
 
   const [logs, setLogs] = useState<LogEntry[]>(() => [
     {
       id: makeId(),
       elapsed: '00:00',
-      message: 'Iniciando Gas-Zero Dashboard v1.0.0…',
+      message: 'Gas-Zero v2.0 iniciado · Persistencia local activa',
       kind: 'info',
     },
     {
       id: makeId(),
       elapsed: '00:00',
-      message: 'Buscando módulo ESP32 (HX711 + BLE GATT)…',
+      message: 'Modo Demo listo (consumo automático en pausa). Usa el slider o BLE real.',
       kind: 'ble',
     },
   ]);
 
-  // Persistir configuración
+  const storeRef = useRef(store);
+  storeRef.current = store;
+
+  // Guardar automáticamente todo el estado en localStorage
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      localStorage.setItem(STORAGE_V2_KEY, JSON.stringify(store));
     } catch {
-      // Ignorar errores de cuota de almacenamiento
+      // Ignorar errores de almacenamiento lleno
     }
-  }, [config]);
+  }, [store]);
 
   const addLog = useCallback((message: string, kind: LogEntry['kind'] = 'info') => {
     setLogs((prev) => [
@@ -159,403 +279,673 @@ export function useGasZero() {
         message,
         kind,
       },
-      ...prev.slice(0, 59),
+      ...prev.slice(0, 69),
     ]);
   }, []);
 
-  const addEvent = useCallback((type: GasEvent['type'], message: string) => {
-    setEvents((prev) => [
-      {
-        id: makeId(),
-        timestamp: Date.now(),
-        type,
-        message,
-      },
-      ...prev.slice(0, 49),
-    ]);
-  }, []);
-
-  const evaluateAlerts = useCallback(
-    (nextPct: number, gasCode: GasCode, thresholds: AlertThresholds) => {
+  const dispatchAlertSideEffects = useCallback(
+    (level: Exclude<AlertLevel, 'ok'>, cylinderLabel: string, gasCode: GasCode, nextPct: number) => {
+      const { alerts } = storeRef.current.settings;
       const gasName = GAS_CATALOG[gasCode].name;
-      if (nextPct <= thresholds.dangerPct && !dangerNotifiedRef.current) {
-        dangerNotifiedRef.current = true;
-        warnNotifiedRef.current = true;
-        addEvent('danger', `Alerta crítica: cilindro de ${gasName} casi vacío (${nextPct}%)`);
-        addLog(`ALERTA CRÍTICA: nivel de ${gasName} en ${nextPct}%`, 'warn');
-      } else if (
-        nextPct <= thresholds.warnPct &&
-        nextPct > thresholds.dangerPct &&
-        !warnNotifiedRef.current
-      ) {
-        warnNotifiedRef.current = true;
-        addEvent('warn', `Alerta: nivel bajo (${nextPct}%) en cilindro de ${gasName}`);
-        addLog(`Aviso de nivel bajo: ${nextPct}% restante`, 'warn');
+      if (alerts.soundEnabled) {
+        playAlertChime(level);
+      }
+      if (alerts.browserNotificationsEnabled) {
+        const title =
+          level === 'danger'
+            ? `Gas-Zero · Nivel CRÍTICO (${nextPct}%)`
+            : `Gas-Zero · Nivel bajo (${nextPct}%)`;
+        const body = `${cylinderLabel} (${gasName}) requiere recarga o reemplazo pronto.`;
+        sendBrowserNotification(title, body);
       }
     },
-    [addEvent, addLog]
+    []
   );
 
-  // Handshake inicial en modo simulador
-  useEffect(() => {
-    if (mode !== 'simulator') return;
-    setConnectionStatus('connecting');
-    setConnectionDetail('Sincronizando simulador ESP32…');
-    const timer = window.setTimeout(() => {
-      setConnectionStatus('connected');
-      setConnectionDetail('ESP32 simulado · BLE GATT');
-      addLog('Enlace BLE simulado establecido (MTU 128 bytes)', 'ble');
-      addLog(`Peso inicial HX711: ${(config.tareKg + config.capacityKg).toFixed(2)} kg`, 'data');
-    }, 950);
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+  const activeCylinder = useMemo(() => {
+    return (
+      store.cylinders.find((c) => c.id === store.activeCylinderId) ?? store.cylinders[0]
+    );
+  }, [store.activeCylinderId, store.cylinders]);
 
-  const applySimulatedStep = useCallback(
-    (dropKg: number, reason: 'auto' | 'manual' | 'leak') => {
-      setNetKg((prevNet) => {
-        if (prevNet <= 0) return 0;
-        const actualDrop = Math.min(prevNet, Math.max(0.05, dropKg));
-        const nextNet = Number(Math.max(0, prevNet - actualDrop).toFixed(2));
-        const nextWeight = Number((config.tareKg + nextNet).toFixed(2));
-        const nextPct =
-          config.capacityKg > 0
-            ? Math.min(100, Math.max(0, Math.round((nextNet / config.capacityKg) * 100)))
-            : 0;
-
-        const payload: Esp32TelemetryPayload = {
-          weight: nextWeight,
-          tare: config.tareKg,
-          net: nextNet,
-          pct: nextPct,
-          gas: config.gasCode,
-        };
-
-        setWeightKg(nextWeight);
-        setPct(nextPct);
-        setLastRawJson(JSON.stringify(payload));
-        setConsumedSessionKg((c) => Number((c + actualDrop).toFixed(2)));
-        setSimElapsedHours((h) => Number((h + (reason === 'manual' ? 0.85 : 0.45)).toFixed(2)));
-
-        setHistory((prev) => [
-          ...prev.slice(-39),
-          {
-            id: makeId(),
-            timestamp: Date.now(),
-            weightKg: nextWeight,
-            netKg: nextNet,
-            pct: nextPct,
-            gas: config.gasCode,
-          },
-        ]);
-
-        if (reason === 'manual') {
-          addLog(`Lectura forzada HX711: ${nextWeight.toFixed(2)} kg (neto ${nextNet.toFixed(2)} kg)`, 'data');
-        } else if (reason === 'leak') {
-          addLog(`Caída acelerada detectada: -${actualDrop.toFixed(2)} kg (${nextPct}%)`, 'warn');
-        } else {
-          addLog(`Peso recibido: ${nextWeight.toFixed(2)} kg · ${nextPct}% restante`, 'data');
-        }
-
-        evaluateAlerts(nextPct, config.gasCode, config.thresholds);
-        return nextNet;
-      });
+  const mutateActiveCylinder = useCallback(
+    (updater: (cyl: CylinderState, settings: PersistedSettings) => CylinderState) => {
+      setStore((prev) => ({
+        ...prev,
+        cylinders: prev.cylinders.map((c) =>
+          c.id === prev.activeCylinderId ? updater(c, prev.settings) : c
+        ),
+      }));
     },
-    [addLog, config.capacityKg, config.gasCode, config.tareKg, config.thresholds, evaluateAlerts]
+    []
   );
 
-  // Bucle periódico del simulador
-  useEffect(() => {
-    if (mode !== 'simulator' || connectionStatus !== 'connected' || !simRunning) return;
-    const intervalMs = simSpeed === 'fast' ? 2200 : 5200;
-    const id = window.setInterval(() => {
-      const baseStep = Math.max(0.18, config.capacityKg * (simSpeed === 'fast' ? 0.045 : 0.018));
-      const jitter = (Math.random() - 0.35) * baseStep * 0.4;
-      applySimulatedStep(Number((baseStep + jitter).toFixed(2)), 'auto');
-    }, intervalMs);
-    return () => window.clearInterval(id);
-  }, [applySimulatedStep, config.capacityKg, connectionStatus, mode, simRunning, simSpeed]);
-
-  // Limpiar conexión BLE al desmontar
+  // Limpiar BLE al desmontar
   useEffect(() => {
     return () => {
       bleClientRef.current?.disconnect();
     };
   }, []);
 
-  const resetCylinderReading = useCallback(
+  const applyNewLevelToActive = useCallback(
     (
-      nextGas: GasCode,
-      nextTare: number,
-      nextCapacity: number,
-      eventMessage: string,
-      eventType: GasEvent['type'] = 'config'
+      nextNetRaw: number,
+      reason: 'auto' | 'sim-step' | 'sim-leak' | 'sim-slider' | 'ble',
+      overridePayload?: { weight?: number; tare?: number; gas?: GasCode; rawJson?: string }
     ) => {
-      const fullWeight = Number((nextTare + nextCapacity).toFixed(2));
-      warnNotifiedRef.current = false;
-      dangerNotifiedRef.current = false;
+      const snapshot = storeRef.current;
+      const currentCyl =
+        snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ?? snapshot.cylinders[0];
+      if (!currentCyl) return;
 
-      setWeightKg(fullWeight);
-      setNetKg(nextCapacity);
-      setPct(100);
-      setLastRawJson(
-        JSON.stringify({
-          weight: fullWeight,
-          tare: nextTare,
-          net: nextCapacity,
-          pct: 100,
-          gas: nextGas,
-        })
-      );
-      setHistory((prev) => [
-        ...prev.slice(-39),
+      const settings = snapshot.settings;
+      const gasCode = overridePayload?.gas ?? currentCyl.gasCode;
+      const tareKg = overridePayload?.tare ?? currentCyl.tareKg;
+      const nextNet = Number(Math.max(0, Math.min(currentCyl.capacityKg, nextNetRaw)).toFixed(2));
+      const nextWeight =
+        overridePayload?.weight !== undefined
+          ? Number(overridePayload.weight.toFixed(2))
+          : Number((tareKg + nextNet).toFixed(2));
+      const nextPct =
+        currentCyl.capacityKg > 0
+          ? Math.min(100, Math.max(0, Math.round((nextNet / currentCyl.capacityKg) * 100)))
+          : 0;
+
+      const deltaConsumed =
+        nextNet < currentCyl.netKg ? Number((currentCyl.netKg - nextNet).toFixed(2)) : 0;
+      const payload: Esp32TelemetryPayload = {
+        weight: nextWeight,
+        tare: tareKg,
+        net: nextNet,
+        pct: nextPct,
+        gas: gasCode,
+      };
+      const rawJson = overridePayload?.rawJson ?? JSON.stringify(payload);
+      const now = Date.now();
+      const nextEvents: GasEvent[] = [...currentCyl.events];
+
+      let warnNotified = currentCyl.warnNotified;
+      let dangerNotified = currentCyl.dangerNotified;
+      const gasName = GAS_CATALOG[gasCode].name;
+      let alertToFire: Exclude<AlertLevel, 'ok'> | null = null;
+
+      if (nextPct > settings.thresholds.warnPct) {
+        warnNotified = false;
+        dangerNotified = false;
+      } else if (nextPct <= settings.thresholds.dangerPct && !dangerNotified) {
+        dangerNotified = true;
+        warnNotified = true;
+        nextEvents.unshift({
+          id: makeId(),
+          timestamp: now,
+          type: 'danger',
+          message: `Alerta crítica: ${currentCyl.label} (${gasName}) en ${nextPct}%`,
+        });
+        alertToFire = 'danger';
+      } else if (
+        nextPct <= settings.thresholds.warnPct &&
+        nextPct > settings.thresholds.dangerPct &&
+        !warnNotified
+      ) {
+        warnNotified = true;
+        nextEvents.unshift({
+          id: makeId(),
+          timestamp: now,
+          type: 'warn',
+          message: `Alerta: nivel bajo (${nextPct}%) en ${currentCyl.label} (${gasName})`,
+        });
+        alertToFire = 'warn';
+      }
+
+      const addedHours =
+        reason === 'auto' ? 0.35 : reason === 'sim-step' || reason === 'sim-leak' ? 0.75 : 0.1;
+
+      const updatedCyl: CylinderState = {
+        ...currentCyl,
+        gasCode,
+        tareKg,
+        weightKg: nextWeight,
+        netKg: nextNet,
+        pct: nextPct,
+        consumedSessionKg: Number((currentCyl.consumedSessionKg + deltaConsumed).toFixed(2)),
+        monitoredHours: Number((currentCyl.monitoredHours + addedHours).toFixed(2)),
+        lastRawJson: rawJson,
+        history: [
+          ...currentCyl.history.slice(-59),
+          {
+            id: makeId(),
+            timestamp: now,
+            weightKg: nextWeight,
+            netKg: nextNet,
+            pct: nextPct,
+            gas: gasCode,
+          },
+        ],
+        events: nextEvents.slice(0, 49),
+        warnNotified,
+        dangerNotified,
+        updatedAt: now,
+      };
+
+      setStore((prev) => ({
+        ...prev,
+        cylinders: prev.cylinders.map((c) => (c.id === updatedCyl.id ? updatedCyl : c)),
+      }));
+
+      if (reason === 'sim-leak') {
+        addLog(`Simulación de consumo alto: ${nextWeight.toFixed(2)} kg (${nextPct}%)`, 'warn');
+      } else if (reason === 'sim-slider') {
+        addLog(
+          `Nivel ajustado manualmente (Demo): ${nextPct}% (${nextNet.toFixed(2)} kg netos)`,
+          'info'
+        );
+      } else if (reason === 'ble') {
+        addLog(`BLE JSON: ${rawJson}`, 'data');
+      } else {
+        addLog(`Lectura actualizada: ${nextWeight.toFixed(2)} kg · ${nextPct}% restante`, 'data');
+      }
+
+      if (alertToFire) {
+        addLog(
+          alertToFire === 'danger'
+            ? `ALERTA CRÍTICA: ${currentCyl.label} en ${nextPct}%`
+            : `Aviso de nivel bajo: ${currentCyl.label} en ${nextPct}%`,
+          'warn'
+        );
+        dispatchAlertSideEffects(alertToFire, currentCyl.label, gasCode, nextPct);
+      }
+    },
+    [addLog, dispatchAlertSideEffects]
+  );
+
+  // Bucle de consumo automático SOLO si el usuario lo activa explícitamente
+  useEffect(() => {
+    if (mode !== 'simulator' || !simAutoConsume) return;
+    const intervalMs = simSpeed === 'fast' ? 2200 : 5000;
+    const id = window.setInterval(() => {
+      const cyl =
+        storeRef.current.cylinders.find((c) => c.id === storeRef.current.activeCylinderId) ??
+        storeRef.current.cylinders[0];
+      if (!cyl || cyl.netKg <= 0) return;
+      const baseStep = Math.max(0.15, cyl.capacityKg * (simSpeed === 'fast' ? 0.04 : 0.015));
+      const jitter = (Math.random() - 0.35) * baseStep * 0.35;
+      applyNewLevelToActive(cyl.netKg - Math.max(0.05, baseStep + jitter), 'auto');
+    }, intervalMs);
+    return () => window.clearInterval(id);
+  }, [applyNewLevelToActive, mode, simAutoConsume, simSpeed]);
+
+  // Acciones realistas vs simulación explícita
+  const forceReading = useCallback(() => {
+    if (mode === 'ble' && bleClientRef.current?.isConnected) {
+      void bleClientRef.current.sendCommand({ cmd: 'READ_NOW' });
+      return;
+    }
+    // En Modo Demo, "Forzar lectura" consulta el estado actual SIN restar gas falsamente
+    const now = Date.now();
+    mutateActiveCylinder((cyl) => ({
+      ...cyl,
+      updatedAt: now,
+      history: [
+        ...cyl.history.slice(-59),
         {
           id: makeId(),
-          timestamp: Date.now(),
-          weightKg: fullWeight,
-          netKg: nextCapacity,
-          pct: 100,
-          gas: nextGas,
+          timestamp: now,
+          weightKg: cyl.weightKg,
+          netKg: cyl.netKg,
+          pct: cyl.pct,
+          gas: cyl.gasCode,
         },
-      ]);
-      addEvent(eventType, eventMessage);
+      ],
+    }));
+    addLog(
+      `Lectura verificada (${activeCylinder.label}): ${activeCylinder.weightKg.toFixed(2)} kg · ${activeCylinder.pct}% (sin cambios)`,
+      'data'
+    );
+  }, [activeCylinder.label, activeCylinder.pct, activeCylinder.weightKg, addLog, mode, mutateActiveCylinder]);
+
+  const simulateConsumption = useCallback(() => {
+    if (mode !== 'simulator') return;
+    const drop = Math.max(0.4, activeCylinder.capacityKg * 0.085);
+    applyNewLevelToActive(activeCylinder.netKg - drop, 'sim-step');
+  }, [activeCylinder.capacityKg, activeCylinder.netKg, applyNewLevelToActive, mode]);
+
+  const simulateLeak = useCallback(() => {
+    if (mode !== 'simulator') return;
+    const drop = Math.max(1.2, activeCylinder.capacityKg * 0.22);
+    applyNewLevelToActive(activeCylinder.netKg - drop, 'sim-leak');
+  }, [activeCylinder.capacityKg, activeCylinder.netKg, applyNewLevelToActive, mode]);
+
+  const setSimulatedPct = useCallback(
+    (targetPct: number) => {
+      if (mode !== 'simulator') return;
+      const clamped = Math.min(100, Math.max(0, Math.round(targetPct)));
+      const targetNet = (activeCylinder.capacityKg * clamped) / 100;
+      applyNewLevelToActive(targetNet, 'sim-slider');
     },
-    [addEvent]
+    [activeCylinder.capacityKg, applyNewLevelToActive, mode]
   );
+
+  const registerRefill = useCallback(() => {
+    const now = Date.now();
+    mutateActiveCylinder((cyl) => {
+      const fullWeight = Number((cyl.tareKg + cyl.capacityKg).toFixed(2));
+      const payload: Esp32TelemetryPayload = {
+        weight: fullWeight,
+        tare: cyl.tareKg,
+        net: cyl.capacityKg,
+        pct: 100,
+        gas: cyl.gasCode,
+      };
+      return {
+        ...cyl,
+        weightKg: fullWeight,
+        netKg: cyl.capacityKg,
+        pct: 100,
+        consumedSessionKg: 0,
+        monitoredHours: 0,
+        refillCount: cyl.refillCount + 1,
+        lastRawJson: JSON.stringify(payload),
+        warnNotified: false,
+        dangerNotified: false,
+        updatedAt: now,
+        history: [
+          ...cyl.history.slice(-59),
+          {
+            id: makeId(),
+            timestamp: now,
+            weightKg: fullWeight,
+            netKg: cyl.capacityKg,
+            pct: 100,
+            gas: cyl.gasCode,
+          },
+        ],
+        events: [
+          {
+            id: makeId(),
+            timestamp: now,
+            type: 'refill',
+            message: `Recarga registrada — ${GAS_CATALOG[cyl.gasCode].name} al 100% (${cyl.capacityKg.toFixed(1)} kg)`,
+          },
+          ...cyl.events.slice(0, 48),
+        ],
+      };
+    });
+    addLog(`Recarga registrada en ${activeCylinder.label}: 100%`, 'info');
+  }, [activeCylinder.label, addLog, mutateActiveCylinder]);
+
+  const applyTare = useCallback(() => {
+    const now = Date.now();
+    if (mode === 'ble' && bleClientRef.current?.isConnected) {
+      void bleClientRef.current.sendCommand({ cmd: 'TARE' });
+    }
+    mutateActiveCylinder((cyl) => ({
+      ...cyl,
+      events: [
+        {
+          id: makeId(),
+          timestamp: now,
+          type: 'tare',
+          message:
+            mode === 'ble'
+              ? 'Comando de tara enviado a báscula ESP32'
+              : `Tara verificada (${cyl.tareKg.toFixed(2)} kg)`,
+        },
+        ...cyl.events.slice(0, 48),
+      ],
+    }));
+    addLog(`Tara aplicada en ${activeCylinder.label}: ${activeCylinder.tareKg.toFixed(2)} kg`, 'info');
+  }, [activeCylinder.label, activeCylinder.tareKg, addLog, mode, mutateActiveCylinder]);
 
   const selectGas = useCallback(
     (gasCode: GasCode) => {
-      setConfig((prev) => ({ ...prev, gasCode }));
+      const now = Date.now();
       const gas = GAS_CATALOG[gasCode];
-      addLog(`Gas seleccionado: ${gas.name} (${gas.symbol})`, 'info');
-
+      mutateActiveCylinder((cyl) => {
+        const payload: Esp32TelemetryPayload = {
+          weight: cyl.weightKg,
+          tare: cyl.tareKg,
+          net: cyl.netKg,
+          pct: cyl.pct,
+          gas: gasCode,
+        };
+        return {
+          ...cyl,
+          gasCode,
+          lastRawJson: JSON.stringify(payload),
+          updatedAt: now,
+          events: [
+            {
+              id: makeId(),
+              timestamp: now,
+              type: 'config',
+              message: `Tipo de gas actualizado a ${gas.name} (${gas.symbol})`,
+            },
+            ...cyl.events.slice(0, 48),
+          ],
+        };
+      });
       if (mode === 'ble' && bleClientRef.current?.isConnected) {
         void bleClientRef.current.sendCommand({
           cmd: 'SET_CONFIG',
           gas: gasCode,
-          tare: config.tareKg,
-          capacity: config.capacityKg,
+          tare: activeCylinder.tareKg,
+          capacity: activeCylinder.capacityKg,
         });
-        addEvent('config', `Gas sincronizado en ESP32 — ${gas.name}`);
-      } else {
-        resetCylinderReading(
-          gasCode,
-          config.tareKg,
-          config.capacityKg,
-          `Cilindro configurado — ${gas.name} · ${config.capacityKg.toFixed(0)} kg`,
-          'config'
-        );
       }
+      addLog(`Gas cambiado en ${activeCylinder.label}: ${gas.name} (${gas.symbol})`, 'info');
     },
-    [addEvent, addLog, config.capacityKg, config.tareKg, mode, resetCylinderReading]
+    [activeCylinder.capacityKg, activeCylinder.label, activeCylinder.tareKg, addLog, mode, mutateActiveCylinder]
   );
 
   const selectTankPreset = useCallback(
     (presetId: Exclude<TankPresetId, 'custom'>) => {
       const preset = TANK_PRESETS.find((t) => t.id === presetId);
       if (!preset) return;
-      setConfig((prev) => ({
-        ...prev,
-        tankPresetId: presetId,
-        capacityKg: preset.capacityKg,
-        tareKg: preset.tareKg,
-      }));
-      const gas = GAS_CATALOG[config.gasCode];
-      addLog(
-        `Tanque actualizado: ${preset.shortLabel} (Cap ${preset.capacityKg} kg, Tara ${preset.tareKg} kg)`,
-        'info'
-      );
-
+      const now = Date.now();
+      mutateActiveCylinder((cyl) => {
+        const nextNet = Number(((preset.capacityKg * cyl.pct) / 100).toFixed(2));
+        const nextWeight = Number((preset.tareKg + nextNet).toFixed(2));
+        const payload: Esp32TelemetryPayload = {
+          weight: nextWeight,
+          tare: preset.tareKg,
+          net: nextNet,
+          pct: cyl.pct,
+          gas: cyl.gasCode,
+        };
+        return {
+          ...cyl,
+          tankPresetId: presetId,
+          capacityKg: preset.capacityKg,
+          tareKg: preset.tareKg,
+          netKg: nextNet,
+          weightKg: nextWeight,
+          lastRawJson: JSON.stringify(payload),
+          updatedAt: now,
+          events: [
+            {
+              id: makeId(),
+              timestamp: now,
+              type: 'config',
+              message: `Capacidad cambiada a Tanque ${preset.shortLabel} (${preset.capacityKg} kg / Tara ${preset.tareKg} kg)`,
+            },
+            ...cyl.events.slice(0, 48),
+          ],
+        };
+      });
       if (mode === 'ble' && bleClientRef.current?.isConnected) {
         void bleClientRef.current.sendCommand({
           cmd: 'SET_CONFIG',
-          gas: config.gasCode,
+          gas: activeCylinder.gasCode,
           tare: preset.tareKg,
           capacity: preset.capacityKg,
         });
-        addEvent('config', `Capacidad sincronizada — ${gas.name} · Tanque ${preset.shortLabel}`);
-      } else {
-        resetCylinderReading(
-          config.gasCode,
-          preset.tareKg,
-          preset.capacityKg,
-          `Cilindro configurado — ${gas.name} · Tanque ${preset.shortLabel}`,
-          'config'
-        );
       }
+      addLog(`Tanque ${preset.shortLabel} aplicado en ${activeCylinder.label}`, 'info');
     },
-    [addEvent, addLog, config.gasCode, mode, resetCylinderReading]
+    [activeCylinder.gasCode, activeCylinder.label, addLog, mode, mutateActiveCylinder]
   );
 
   const updateCustomTank = useCallback(
     (capacityKg: number, tareKg: number) => {
       const safeCap = Math.max(1, Math.min(180, Number(capacityKg.toFixed(2))));
       const safeTare = Math.max(0, Math.min(150, Number(tareKg.toFixed(2))));
-      setConfig((prev) => ({
-        ...prev,
-        tankPresetId: 'custom',
-        capacityKg: safeCap,
-        tareKg: safeTare,
-      }));
-      addLog(`Parámetros personalizados: Cap ${safeCap} kg · Tara ${safeTare} kg`, 'info');
+      const now = Date.now();
+      mutateActiveCylinder((cyl) => {
+        const nextNet = Number(((safeCap * cyl.pct) / 100).toFixed(2));
+        const nextWeight = Number((safeTare + nextNet).toFixed(2));
+        const payload: Esp32TelemetryPayload = {
+          weight: nextWeight,
+          tare: safeTare,
+          net: nextNet,
+          pct: cyl.pct,
+          gas: cyl.gasCode,
+        };
+        return {
+          ...cyl,
+          tankPresetId: 'custom',
+          capacityKg: safeCap,
+          tareKg: safeTare,
+          netKg: nextNet,
+          weightKg: nextWeight,
+          lastRawJson: JSON.stringify(payload),
+          updatedAt: now,
+          events: [
+            {
+              id: makeId(),
+              timestamp: now,
+              type: 'config',
+              message: `Tanque personalizado: Cap ${safeCap} kg · Tara ${safeTare} kg`,
+            },
+            ...cyl.events.slice(0, 48),
+          ],
+        };
+      });
       if (mode === 'ble' && bleClientRef.current?.isConnected) {
         void bleClientRef.current.sendCommand({
           cmd: 'SET_CONFIG',
-          gas: config.gasCode,
+          gas: activeCylinder.gasCode,
           tare: safeTare,
           capacity: safeCap,
         });
-      } else {
-        resetCylinderReading(
-          config.gasCode,
-          safeTare,
-          safeCap,
-          `Tanque personalizado — Cap ${safeCap} kg / Tara ${safeTare} kg`,
-          'config'
-        );
       }
+      addLog(`Parámetros personalizados aplicados: ${safeCap} kg / Tara ${safeTare} kg`, 'info');
     },
-    [addLog, config.gasCode, mode, resetCylinderReading]
+    [activeCylinder.gasCode, addLog, mode, mutateActiveCylinder]
   );
 
-  const forceReading = useCallback(() => {
-    if (mode === 'ble' && bleClientRef.current?.isConnected) {
-      void bleClientRef.current.sendCommand({ cmd: 'READ_NOW' });
-      return;
-    }
-    const drop = Number(Math.max(0.45, config.capacityKg * 0.085).toFixed(2));
-    applySimulatedStep(drop, 'manual');
-  }, [applySimulatedStep, config.capacityKg, mode]);
+  // Gestión de flota multi-cilindro
+  const selectCylinder = useCallback(
+    (cylinderId: string) => {
+      setStore((prev) => {
+        if (!prev.cylinders.some((c) => c.id === cylinderId)) return prev;
+        return { ...prev, activeCylinderId: cylinderId };
+      });
+      const target = storeRef.current.cylinders.find((c) => c.id === cylinderId);
+      if (target) {
+        addLog(`Cambiado a ${target.label} (${GAS_CATALOG[target.gasCode].symbol})`, 'info');
+      }
+    },
+    [addLog]
+  );
 
-  const simulateLeak = useCallback(() => {
-    if (mode !== 'simulator') return;
-    const drop = Number(Math.max(1.2, config.capacityKg * 0.22).toFixed(2));
-    applySimulatedStep(drop, 'leak');
-  }, [applySimulatedStep, config.capacityKg, mode]);
+  const addCylinder = useCallback(
+    (input: NewCylinderInput) => {
+      const next = createCylinder(input, 100);
+      setStore((prev) => ({
+        ...prev,
+        activeCylinderId: next.id,
+        cylinders: [...prev.cylinders, next],
+      }));
+      addLog(`Nuevo cilindro agregado: ${next.label} (${GAS_CATALOG[next.gasCode].name})`, 'info');
+      return next.id;
+    },
+    [addLog]
+  );
 
-  const registerRefill = useCallback(() => {
-    setRefillCount((n) => n + 1);
-    setSimElapsedHours(0);
-    setConsumedSessionKg(0);
-    const gas = GAS_CATALOG[config.gasCode];
-    addLog('Cilindro reemplazado / recargado manualmente (100%)', 'info');
-    resetCylinderReading(
-      config.gasCode,
-      config.tareKg,
-      config.capacityKg,
-      `Recarga registrada — ${gas.name} al 100% (${config.capacityKg.toFixed(1)} kg)`,
-      'refill'
-    );
-  }, [addLog, config.capacityKg, config.gasCode, config.tareKg, resetCylinderReading]);
+  const deleteCylinder = useCallback(
+    (cylinderId: string) => {
+      setStore((prev) => {
+        if (prev.cylinders.length <= 1) return prev;
+        const remaining = prev.cylinders.filter((c) => c.id !== cylinderId);
+        const nextActive =
+          prev.activeCylinderId === cylinderId ? remaining[0].id : prev.activeCylinderId;
+        return {
+          ...prev,
+          activeCylinderId: nextActive,
+          cylinders: remaining,
+        };
+      });
+      addLog('Cilindro eliminado de la flota', 'info');
+    },
+    [addLog]
+  );
 
-  const applyTare = useCallback(() => {
-    if (mode === 'ble' && bleClientRef.current?.isConnected) {
-      void bleClientRef.current.sendCommand({ cmd: 'TARE' });
-      addEvent('tare', 'Comando de tara enviado a báscula ESP32');
-      return;
-    }
-    addLog(`Tara verificada en báscula HX711: ${config.tareKg.toFixed(2)} kg`, 'info');
-    addEvent('tare', `Tara aplicada (${config.tareKg.toFixed(2)} kg)`);
-  }, [addEvent, addLog, config.tareKg, mode]);
+  const updateCylinderMeta = useCallback(
+    (label: string, location: string) => {
+      mutateActiveCylinder((cyl) => ({
+        ...cyl,
+        label: label.trim() || cyl.label,
+        location: location.trim() || 'Área principal',
+      }));
+    },
+    [mutateActiveCylinder]
+  );
 
+  // BLE real
   const connectBle = useCallback(async () => {
     if (!bleClientRef.current) {
       bleClientRef.current = new GasZeroBleClient();
     }
     setMode('ble');
+    setSimAutoConsume(false);
+    const { serviceUuid, telemetryUuid, commandUuid } = storeRef.current.settings;
+
     await bleClientRef.current.connect(
       {
         onTelemetry: (payload, rawJson) => {
-          setWeightKg(payload.weight);
-          setNetKg(payload.net);
-          setPct(payload.pct);
-          setLastRawJson(rawJson);
-          setConfig((prev) =>
-            prev.gasCode === payload.gas && prev.tareKg === payload.tare
-              ? prev
-              : { ...prev, gasCode: payload.gas, tareKg: payload.tare }
-          );
-          setHistory((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && payload.net < last.netKg) {
-              const delta = Number((last.netKg - payload.net).toFixed(2));
-              if (delta > 0 && delta < 5) {
-                setConsumedSessionKg((c) => Number((c + delta).toFixed(2)));
-              }
-            }
-            return [
-              ...prev.slice(-39),
-              {
-                id: makeId(),
-                timestamp: Date.now(),
-                weightKg: payload.weight,
-                netKg: payload.net,
-                pct: payload.pct,
-                gas: payload.gas,
-              },
-            ];
+          applyNewLevelToActive(payload.net, 'ble', {
+            weight: payload.weight,
+            tare: payload.tare,
+            gas: payload.gas,
+            rawJson,
           });
-          addLog(`BLE JSON: ${rawJson}`, 'data');
-          evaluateAlerts(payload.pct, payload.gas, config.thresholds);
         },
         onStatusChange: (status, detail) => {
           setConnectionStatus(status);
           if (detail) setConnectionDetail(detail);
           setBleDeviceName(bleClientRef.current?.deviceName ?? null);
           if (status === 'connected') {
-            addEvent('ble', `Conectado por BLE a ${bleClientRef.current?.deviceName ?? 'ESP32 Gas-Zero'}`);
+            const devName = bleClientRef.current?.deviceName ?? 'ESP32 Gas-Zero';
+            mutateActiveCylinder((cyl) => ({
+              ...cyl,
+              events: [
+                {
+                  id: makeId(),
+                  timestamp: Date.now(),
+                  type: 'ble',
+                  message: `Conectado por BLE a ${devName}`,
+                },
+                ...cyl.events.slice(0, 48),
+              ],
+            }));
           }
         },
         onLog: addLog,
       },
-      config.serviceUuid,
-      config.telemetryUuid,
-      config.commandUuid
+      serviceUuid,
+      telemetryUuid,
+      commandUuid
     );
-  }, [addEvent, addLog, config.commandUuid, config.serviceUuid, config.telemetryUuid, config.thresholds, evaluateAlerts]);
+  }, [addLog, applyNewLevelToActive, mutateActiveCylinder]);
 
   const disconnectBle = useCallback(() => {
     bleClientRef.current?.disconnect();
     setBleDeviceName(null);
-    addEvent('ble', 'Sesión BLE finalizada');
-  }, [addEvent]);
+    setConnectionStatus('disconnected');
+    setConnectionDetail('Esperando enlace BLE con ESP32');
+  }, []);
 
   const switchToSimulator = useCallback(() => {
     bleClientRef.current?.disconnect();
     setBleDeviceName(null);
     setMode('simulator');
-    addLog('Modo simulador reactivado', 'info');
+    setConnectionStatus('connected');
+    setConnectionDetail('Modo Demo activo · Sin hardware físico');
+    addLog('Modo Demo (simulador) activado', 'info');
   }, [addLog]);
 
+  // Ajustes, alertas y notificaciones
   const updateThresholds = useCallback((next: AlertThresholds) => {
     const warnPct = Math.min(50, Math.max(5, Math.round(next.warnPct)));
     const dangerPct = Math.min(warnPct - 1, Math.max(1, Math.round(next.dangerPct)));
-    setConfig((prev) => ({
+    setStore((prev) => ({
       ...prev,
-      thresholds: { warnPct, dangerPct },
+      settings: {
+        ...prev.settings,
+        thresholds: { warnPct, dangerPct },
+      },
     }));
   }, []);
 
-  const updateCylinderLabel = useCallback((label: string) => {
-    setConfig((prev) => ({ ...prev, cylinderLabel: label.trim() || 'Cilindro #001' }));
+  const toggleSoundAlerts = useCallback(() => {
+    setStore((prev) => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        alerts: {
+          ...prev.settings.alerts,
+          soundEnabled: !prev.settings.alerts.soundEnabled,
+        },
+      },
+    }));
   }, []);
+
+  const toggleBrowserNotifications = useCallback(async () => {
+    const current = storeRef.current.settings.alerts.browserNotificationsEnabled;
+    if (!current) {
+      const perm = await requestBrowserNotificationPermission();
+      setNotificationPermission(perm);
+      if (perm !== 'granted') {
+        addLog('Permiso de notificaciones del navegador denegado o no soportado', 'warn');
+        return;
+      }
+    }
+    setStore((prev) => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        alerts: {
+          ...prev.settings.alerts,
+          browserNotificationsEnabled: !prev.settings.alerts.browserNotificationsEnabled,
+        },
+      },
+    }));
+  }, [addLog]);
+
+  const testAlert = useCallback(
+    (level: Exclude<AlertLevel, 'ok'> = 'warn') => {
+      playAlertChime(level);
+      if (storeRef.current.settings.alerts.browserNotificationsEnabled) {
+        sendBrowserNotification(
+          `Gas-Zero · Prueba de alerta (${level === 'danger' ? 'Crítica' : 'Baja'})`,
+          `${activeCylinder.label} · ${GAS_CATALOG[activeCylinder.gasCode].name} (${activeCylinder.pct}%)`
+        );
+      }
+      addLog(`Prueba de alerta ${level === 'danger' ? 'crítica' : 'nivel bajo'} ejecutada`, 'warn');
+    },
+    [activeCylinder.gasCode, activeCylinder.label, activeCylinder.pct, addLog]
+  );
 
   const updateBleUuids = useCallback(
     (serviceUuid: string, telemetryUuid: string, commandUuid: string) => {
-      setConfig((prev) => ({
+      setStore((prev) => ({
         ...prev,
-        serviceUuid: serviceUuid.trim() || GAS_ZERO_BLE.SERVICE_UUID,
-        telemetryUuid: telemetryUuid.trim() || GAS_ZERO_BLE.TELEMETRY_CHAR_UUID,
-        commandUuid: commandUuid.trim() || GAS_ZERO_BLE.COMMAND_CHAR_UUID,
+        settings: {
+          ...prev.settings,
+          serviceUuid: serviceUuid.trim() || GAS_ZERO_BLE.SERVICE_UUID,
+          telemetryUuid: telemetryUuid.trim() || GAS_ZERO_BLE.TELEMETRY_CHAR_UUID,
+          commandUuid: commandUuid.trim() || GAS_ZERO_BLE.COMMAND_CHAR_UUID,
+        },
       }));
     },
     []
   );
 
+  const resetAllData = useCallback(() => {
+    localStorage.removeItem(STORAGE_V2_KEY);
+    localStorage.removeItem(LEGACY_V1_KEY);
+    const fresh = buildDefaultStore();
+    setStore(fresh);
+    setSimAutoConsume(false);
+    addLog('Datos locales restablecidos a valores iniciales', 'info');
+  }, [addLog]);
+
   const exportHistoryCsv = useCallback(() => {
-    const header = 'Fecha_Hora,Gas,Peso_Bruto_kg,Gas_Neto_kg,Nivel_pct';
-    const rows = history.map((h) =>
+    const header = 'Cilindro,Ubicacion,Fecha_Hora,Gas,Peso_Bruto_kg,Gas_Neto_kg,Nivel_pct';
+    const rows = activeCylinder.history.map((h) =>
       [
+        `"${activeCylinder.label.replace(/"/g, '""')}"`,
+        `"${activeCylinder.location.replace(/"/g, '""')}"`,
         new Date(h.timestamp).toISOString(),
         h.gas,
         h.weightKg.toFixed(2),
@@ -568,69 +958,92 @@ export function useGasZero() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `gas-zero-historial-${config.gasCode}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `gas-zero-${activeCylinder.gasCode}-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    addLog('Historial exportado en formato CSV', 'info');
-  }, [addLog, config.gasCode, history]);
+    addLog(`Historial de ${activeCylinder.label} exportado a CSV`, 'info');
+  }, [activeCylinder, addLog]);
 
-  const alertLevel: AlertLevel = useMemo(() => {
-    if (pct <= config.thresholds.dangerPct) return 'danger';
-    if (pct <= config.thresholds.warnPct) return 'warn';
-    return 'ok';
-  }, [config.thresholds.dangerPct, config.thresholds.warnPct, pct]);
+  const alertLevel = useMemo(
+    () => getAlertLevel(activeCylinder.pct, store.settings.thresholds),
+    [activeCylinder.pct, store.settings.thresholds]
+  );
+
+  const fleetSummary = useMemo(() => {
+    let ok = 0;
+    let warn = 0;
+    let danger = 0;
+    for (const c of store.cylinders) {
+      const lvl = getAlertLevel(c.pct, store.settings.thresholds);
+      if (lvl === 'danger') danger += 1;
+      else if (lvl === 'warn') warn += 1;
+      else ok += 1;
+    }
+    return {
+      total: store.cylinders.length,
+      ok,
+      warn,
+      danger,
+      alertsCount: warn + danger,
+    };
+  }, [store.cylinders, store.settings.thresholds]);
 
   const avgDailyConsumptionKg = useMemo(() => {
-    if (consumedSessionKg <= 0 || simElapsedHours <= 0.1) return null;
-    const perDay = (consumedSessionKg / simElapsedHours) * 24;
-    return Number(perDay.toFixed(2));
-  }, [consumedSessionKg, simElapsedHours]);
+    if (activeCylinder.consumedSessionKg <= 0 || activeCylinder.monitoredHours <= 0.1) return null;
+    return Number(((activeCylinder.consumedSessionKg / activeCylinder.monitoredHours) * 24).toFixed(2));
+  }, [activeCylinder.consumedSessionKg, activeCylinder.monitoredHours]);
 
   const autonomyDays = useMemo(() => {
-    if (!avgDailyConsumptionKg || avgDailyConsumptionKg <= 0 || netKg <= 0) return null;
-    return Number((netKg / avgDailyConsumptionKg).toFixed(1));
-  }, [avgDailyConsumptionKg, netKg]);
+    if (!avgDailyConsumptionKg || avgDailyConsumptionKg <= 0 || activeCylinder.netKg <= 0) {
+      return null;
+    }
+    return Number((activeCylinder.netKg / avgDailyConsumptionKg).toFixed(1));
+  }, [activeCylinder.netKg, avgDailyConsumptionKg]);
 
-  const gasConfig = GAS_CATALOG[config.gasCode];
+  const gasConfig = GAS_CATALOG[activeCylinder.gasCode];
 
   return {
-    config,
+    cylinders: store.cylinders,
+    activeCylinder,
+    settings: store.settings,
     gasConfig,
+    fleetSummary,
     mode,
     connectionStatus,
     connectionDetail,
     bleDeviceName,
     bleSupported: isWebBluetoothSupported(),
-    simRunning,
-    setSimRunning,
+    notificationPermission,
+    simAutoConsume,
+    setSimAutoConsume,
     simSpeed,
     setSimSpeed,
-    weightKg,
-    netKg,
-    pct,
     alertLevel,
-    consumedSessionKg,
-    refillCount,
-    simElapsedHours,
     avgDailyConsumptionKg,
     autonomyDays,
-    lastRawJson,
-    history,
-    events,
     logs,
+    selectCylinder,
+    addCylinder,
+    deleteCylinder,
+    updateCylinderMeta,
     selectGas,
     selectTankPreset,
     updateCustomTank,
     forceReading,
+    simulateConsumption,
     simulateLeak,
+    setSimulatedPct,
     registerRefill,
     applyTare,
     connectBle,
     disconnectBle,
     switchToSimulator,
     updateThresholds,
-    updateCylinderLabel,
+    toggleSoundAlerts,
+    toggleBrowserNotifications,
+    testAlert,
     updateBleUuids,
+    resetAllData,
     exportHistoryCsv,
   };
 }

@@ -11,13 +11,15 @@ npm run dev
 
 Abre `http://localhost:5173` en tu navegador (Chrome o Edge recomendado para Web Bluetooth).
 
-## Funcionalidades actuales (Fase 1: App y Dashboard)
+## Funcionalidades actuales (Fase 2: App de Producción)
 
-- **Monitor en tiempo real (`Inicio`):** Gauge circular SVG con brillo dinámico, cilindro animado por nivel, peso bruto/neto/tara/capacidad y cálculo de autonomía estimada.
-- **Selectores de gas y cilindro:** `N₂`, `Ar`, `CO₂`, `O₂` y `LP` (con paleta de acento propia), presets de capacidad/tara (`10 kg`, `20 kg`, `30 kg`, `50 kg`) y edición manual de tara y capacidad persistida en `localStorage`.
-- **Simulador ESP32 integrado:** Controles para pausar/reanudar consumo, cambiar velocidad, forzar lectura, simular consumo alto, aplicar tara y registrar recarga/cambio.
-- **Historial y analítica (`Historial`):** KPIs de consumo, gráfica interactiva de barras por nivel con código de color, línea de tiempo de eventos y exportación a **CSV**.
-- **Ahorro y seguridad (`Ahorrar gas`):** Consejos rotativos y notas de seguridad específicas por tipo de gas.
+- **Multi-cilindro (`Flota`):** Alta, edición, ubicación, eliminación y cambio rápido entre múltiples cilindros con resumen de estado (Óptimos, Nivel bajo, Críticos) y badge de alertas activas.
+- **Monitor en tiempo real (`Monitor`):** Gauge circular SVG con brillo dinámico, cilindro animado por nivel, peso bruto/neto/tara/capacidad y cálculo de autonomía estimada.
+- **Persistencia local automática:** Todos los cilindros, historiales, eventos, recargas y ajustes se guardan automáticamente en `localStorage`.
+- **Alertas reales:** Alertas sonoras sintetizadas (Web Audio API), notificaciones nativas del navegador (Notification API) y botones de prueba de alerta.
+- **Laboratorio Demo separado de lectura real:** `Forzar lectura` consulta el nivel actual sin restar gas; las pruebas sin hardware se controlan explícitamente con slider (`0%–100%`), botones de consumo/fuga y auto-consumo opcional.
+- **Historial y analítica (`Historial`):** KPIs de consumo, gráfica interactiva de barras por nivel, línea de tiempo de eventos y exportación a **CSV**.
+- **Ahorro y seguridad (`Ahorro`):** Consejos rotativos y notas de seguridad específicas por gas (`N₂`, `Ar`, `CO₂`, `O₂`, `LP`).
 - **Conexión BLE y ajustes (`BLE / Ajustes`):** Cliente Web Bluetooth listo para enlazar el futuro ESP32, umbrales de alerta configurables y UUIDs GATT editables.
 
 ## Contrato BLE previsto (Fase 2: Firmware ESP32 + HX711)

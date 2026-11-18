@@ -1,6 +1,14 @@
 import { useState, type CSSProperties } from 'react';
-import { BarChart3, Bluetooth, Gauge, Lightbulb, Radio } from 'lucide-react';
+import {
+  BarChart3,
+  Bluetooth,
+  Gauge,
+  Layers,
+  Lightbulb,
+  Radio,
+} from 'lucide-react';
 import { Esp32Console } from './components/Esp32Console';
+import { FleetView } from './components/FleetView';
 import { GasTankSelector } from './components/GasTankSelector';
 import { GaugeCard } from './components/GaugeCard';
 import { HeaderBar } from './components/HeaderBar';
@@ -8,19 +16,27 @@ import { HistoryView } from './components/HistoryView';
 import { QuickActions } from './components/QuickActions';
 import { SettingsBleView } from './components/SettingsBleView';
 import { TipsView } from './components/TipsView';
-import { useGasZero } from './hooks/useGasZero';
+import { GAS_CATALOG } from './constants/gases';
+import { getAlertLevel, useGasZero } from './hooks/useGasZero';
 import type { NavTab } from './types/gas';
 
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Gauge }> = [
-  { id: 'inicio', label: 'Inicio', icon: Gauge },
-  { id: 'historial', label: 'Historial', icon: BarChart3 },
-  { id: 'ahorrar', label: 'Ahorrar gas', icon: Lightbulb },
-  { id: 'conexion', label: 'BLE / Ajustes', icon: Bluetooth },
+const NAV_ITEMS: Array<{ id: NavTab; label: string; shortLabel: string; icon: typeof Gauge }> = [
+  { id: 'inicio', label: 'Monitor', shortLabel: 'Monitor', icon: Gauge },
+  { id: 'flota', label: 'Flota', shortLabel: 'Flota', icon: Layers },
+  { id: 'historial', label: 'Historial', shortLabel: 'Historial', icon: BarChart3 },
+  { id: 'ahorrar', label: 'Ahorrar gas', shortLabel: 'Ahorro', icon: Lightbulb },
+  { id: 'conexion', label: 'BLE / Ajustes', shortLabel: 'Ajustes', icon: Bluetooth },
 ];
 
 export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('inicio');
   const gz = useGasZero();
+  const cyl = gz.activeCylinder;
+
+  const handleSelectCylinderAndOpen = (id: string) => {
+    gz.selectCylinder(id);
+    setActiveTab('inicio');
+  };
 
   return (
     <div
@@ -35,7 +51,7 @@ export function App() {
           </div>
           <div>
             <strong>Gas-Zero</strong>
-            <span>Báscula IoT · v1.0</span>
+            <span>Báscula IoT · v2.0</span>
           </div>
         </div>
 
@@ -48,19 +64,44 @@ export function App() {
               onClick={() => setActiveTab(id)}
             >
               <Icon size={17} />
-              <span>{label}</span>
+              <span className="gz-side-link-text">{label}</span>
+              {id === 'flota' && gz.fleetSummary.alertsCount > 0 && (
+                <span className="gz-nav-badge">{gz.fleetSummary.alertsCount}</span>
+              )}
             </button>
           ))}
         </nav>
 
-        <div className="gz-side-footer">
-          <div className="gz-side-summary">
-            <span className="gz-side-label">Cilindro activo</span>
-            <strong>{gz.config.cylinderLabel}</strong>
-            <div className="gz-side-meta">
-              <span>{gz.gasConfig.symbol} · {gz.gasConfig.name}</span>
-              <strong className="gz-mono">{gz.pct}%</strong>
-            </div>
+        {/* Selector rápido de cilindros en el sidebar */}
+        <div className="gz-side-fleet">
+          <div className="gz-side-fleet-head">
+            <span className="gz-side-label">Cilindros ({gz.cylinders.length})</span>
+            <button
+              type="button"
+              className="gz-link-btn"
+              onClick={() => setActiveTab('flota')}
+            >
+              Ver todos
+            </button>
+          </div>
+          <div className="gz-side-cyl-list">
+            {gz.cylinders.map((item) => {
+              const gas = GAS_CATALOG[item.gasCode];
+              const lvl = getAlertLevel(item.pct, gz.settings.thresholds);
+              const isActive = item.id === cyl.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`gz-side-cyl ${isActive ? 'is-active' : ''}`}
+                  onClick={() => gz.selectCylinder(item.id)}
+                >
+                  <span className="gz-side-cyl-dot" style={{ background: gas.accent }} />
+                  <span className="gz-side-cyl-name">{item.label}</span>
+                  <strong className={`gz-mono gz-lvl-${lvl}`}>{item.pct}%</strong>
+                </button>
+              );
+            })}
           </div>
         </div>
       </aside>
@@ -69,30 +110,64 @@ export function App() {
       <main className="gz-main">
         <div className="gz-card-frame">
           <HeaderBar
-            cylinderLabel={gz.config.cylinderLabel}
+            cylinderLabel={cyl.label}
+            cylinderLocation={cyl.location}
             mode={gz.mode}
             connectionStatus={gz.connectionStatus}
             bleDeviceName={gz.bleDeviceName}
+            soundEnabled={gz.settings.alerts.soundEnabled}
+            onToggleSound={gz.toggleSoundAlerts}
             onOpenConnection={() => setActiveTab('conexion')}
           />
+
+          {/* Selector rápido de cilindros en móvil */}
+          {gz.cylinders.length > 1 && (
+            <div className="gz-mobile-fleet-strip" role="tablist" aria-label="Cambiar cilindro">
+              {gz.cylinders.map((item) => {
+                const gas = GAS_CATALOG[item.gasCode];
+                const isActive = item.id === cyl.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`gz-strip-pill ${isActive ? 'is-active' : ''}`}
+                    style={{ '--chip-accent': gas.accent } as CSSProperties}
+                    onClick={() => gz.selectCylinder(item.id)}
+                  >
+                    <span className="gz-side-cyl-dot" style={{ background: gas.accent }} />
+                    <span>{item.label}</span>
+                    <strong className="gz-mono">{item.pct}%</strong>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {gz.mode === 'simulator' && (
             <div className="gz-simbadge">
               <Radio size={14} />
-              <span>Datos simulados — sin hardware físico ESP32 conectado aún</span>
+              <span>
+                Modo Demo activo — sin hardware ESP32 conectado. El nivel no baja solo salvo que
+                uses el Laboratorio Demo.
+              </span>
             </div>
           )}
 
           {/* Barra de pestañas visible en móvil/tablet */}
           <nav className="gz-tabs" aria-label="Secciones">
-            {NAV_ITEMS.map(({ id, label }) => (
+            {NAV_ITEMS.map(({ id, shortLabel }) => (
               <button
                 key={id}
                 type="button"
                 className={`gz-tab ${activeTab === id ? 'is-active' : ''}`}
                 onClick={() => setActiveTab(id)}
               >
-                {label}
+                <span>{shortLabel}</span>
+                {id === 'flota' && gz.fleetSummary.alertsCount > 0 && (
+                  <span className="gz-tab-dot" aria-label="Alertas activas" />
+                )}
               </button>
             ))}
           </nav>
@@ -101,11 +176,11 @@ export function App() {
             <div className="gz-dashboard-grid">
               <div className="gz-col-primary">
                 <GaugeCard
-                  pct={gz.pct}
-                  weightKg={gz.weightKg}
-                  netKg={gz.netKg}
-                  tareKg={gz.config.tareKg}
-                  capacityKg={gz.config.capacityKg}
+                  pct={cyl.pct}
+                  weightKg={cyl.weightKg}
+                  netKg={cyl.netKg}
+                  tareKg={cyl.tareKg}
+                  capacityKg={cyl.capacityKg}
                   autonomyDays={gz.autonomyDays}
                   alertLevel={gz.alertLevel}
                   gasConfig={gz.gasConfig}
@@ -113,14 +188,17 @@ export function App() {
 
                 <QuickActions
                   mode={gz.mode}
-                  simRunning={gz.simRunning}
+                  pct={cyl.pct}
+                  simAutoConsume={gz.simAutoConsume}
                   simSpeed={gz.simSpeed}
-                  onToggleSim={() => gz.setSimRunning((v) => !v)}
+                  onToggleSimAuto={() => gz.setSimAutoConsume((v) => !v)}
                   onToggleSpeed={() =>
                     gz.setSimSpeed((s) => (s === 'normal' ? 'fast' : 'normal'))
                   }
                   onForceReading={gz.forceReading}
+                  onSimulateConsumption={gz.simulateConsumption}
                   onSimulateLeak={gz.simulateLeak}
+                  onSetSimulatedPct={gz.setSimulatedPct}
                   onApplyTare={gz.applyTare}
                   onRegisterRefill={gz.registerRefill}
                 />
@@ -128,29 +206,44 @@ export function App() {
 
               <div className="gz-col-secondary">
                 <GasTankSelector
-                  gasCode={gz.config.gasCode}
-                  tankPresetId={gz.config.tankPresetId}
-                  capacityKg={gz.config.capacityKg}
-                  tareKg={gz.config.tareKg}
+                  gasCode={cyl.gasCode}
+                  tankPresetId={cyl.tankPresetId}
+                  capacityKg={cyl.capacityKg}
+                  tareKg={cyl.tareKg}
                   onSelectGas={gz.selectGas}
                   onSelectPreset={gz.selectTankPreset}
                   onUpdateCustomTank={gz.updateCustomTank}
                 />
 
-                <Esp32Console logs={gz.logs} lastRawJson={gz.lastRawJson} />
+                <Esp32Console logs={gz.logs} lastRawJson={cyl.lastRawJson} />
               </div>
             </div>
           )}
 
+          {activeTab === 'flota' && (
+            <FleetView
+              cylinders={gz.cylinders}
+              activeCylinderId={cyl.id}
+              thresholds={gz.settings.thresholds}
+              fleetSummary={gz.fleetSummary}
+              onSelectCylinder={handleSelectCylinderAndOpen}
+              onAddCylinder={(input) => {
+                gz.addCylinder(input);
+                setActiveTab('inicio');
+              }}
+              onDeleteCylinder={gz.deleteCylinder}
+            />
+          )}
+
           {activeTab === 'historial' && (
             <HistoryView
-              history={gz.history}
-              events={gz.events}
-              thresholds={gz.config.thresholds}
+              history={cyl.history}
+              events={cyl.events}
+              thresholds={gz.settings.thresholds}
               avgDailyConsumptionKg={gz.avgDailyConsumptionKg}
-              consumedSessionKg={gz.consumedSessionKg}
-              simElapsedHours={gz.simElapsedHours}
-              refillCount={gz.refillCount}
+              consumedSessionKg={cyl.consumedSessionKg}
+              simElapsedHours={cyl.monitoredHours}
+              refillCount={cyl.refillCount}
               onExportCsv={gz.exportHistoryCsv}
             />
           )}
@@ -166,17 +259,24 @@ export function App() {
               connectionDetail={gz.connectionDetail}
               bleDeviceName={gz.bleDeviceName}
               bleSupported={gz.bleSupported}
-              cylinderLabel={gz.config.cylinderLabel}
-              thresholds={gz.config.thresholds}
-              serviceUuid={gz.config.serviceUuid}
-              telemetryUuid={gz.config.telemetryUuid}
-              commandUuid={gz.config.commandUuid}
+              cylinderLabel={cyl.label}
+              cylinderLocation={cyl.location}
+              thresholds={gz.settings.thresholds}
+              alerts={gz.settings.alerts}
+              notificationPermission={gz.notificationPermission}
+              serviceUuid={gz.settings.serviceUuid}
+              telemetryUuid={gz.settings.telemetryUuid}
+              commandUuid={gz.settings.commandUuid}
               onConnectBle={() => void gz.connectBle()}
               onDisconnectBle={gz.disconnectBle}
               onSwitchToSimulator={gz.switchToSimulator}
-              onUpdateCylinderLabel={gz.updateCylinderLabel}
+              onUpdateCylinderMeta={gz.updateCylinderMeta}
               onUpdateThresholds={gz.updateThresholds}
+              onToggleSoundAlerts={gz.toggleSoundAlerts}
+              onToggleBrowserNotifications={() => void gz.toggleBrowserNotifications()}
+              onTestAlert={gz.testAlert}
               onUpdateBleUuids={gz.updateBleUuids}
+              onResetAllData={gz.resetAllData}
             />
           )}
         </div>
