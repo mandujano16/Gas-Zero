@@ -22,7 +22,13 @@ Abre `http://localhost:5173` en tu navegador (Chrome o Edge recomendado para Web
 - **Ahorro y seguridad (`Ahorro`):** Consejos rotativos y notas de seguridad específicas por gas (`N₂`, `Ar`, `CO₂`, `O₂`, `LP`).
 - **Conexión BLE y ajustes (`BLE / Ajustes`):** Cliente Web Bluetooth listo para enlazar el futuro ESP32, umbrales de alerta configurables y UUIDs GATT editables.
 
-## Contrato BLE previsto (Fase 2: Firmware ESP32 + HX711)
+## Firmware ESP32 + Guía de Hardware (`firmware/`)
+
+- **[Guía de compras, cableado y subida a Arduino IDE](firmware/GUIA_HARDWARE_Y_CONEXIONES.md)** — Explicada desde cero (puente de Wheatstone de 4 celdas de 50 kg, pinout HX711 → ESP32 y batería 18650).
+- **[Calibrador rápido HX711](firmware/calibracion_hx711/calibracion_hx711.ino)** — Sketch de 2 minutos para obtener tu factor de escala con un peso conocido.
+- **[Firmware principal BLE GATT](firmware/gas_zero_esp32/gas_zero_esp32.ino)** — Filtro paso bajo digital, ahorro energético (`power_down` + CPU 80 MHz), memoria permanente NVS (`Preferences`), LCD 16x2 I2C opcional y servidor BLE GATT listo para esta app.
+
+## Contrato BLE (ESP32 ↔ App React)
 
 - **Service UUID:** `4fafc201-1fb5-459e-8fcc-c5c9c331914b`
 - **Telemetry Characteristic (Notify):** `beb5483e-36e1-4688-b7f5-ea07361b26a8`
