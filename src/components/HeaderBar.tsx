@@ -4,6 +4,7 @@ import {
   BluetoothSearching,
   MapPin,
   Radio,
+  Usb,
   Volume2,
   VolumeX,
   WifiOff,
@@ -38,6 +39,12 @@ export function HeaderBar({
     if (mode === 'simulator') {
       return 'Modo Demo';
     }
+    if (mode === 'serial') {
+      if (isConnected) return bleDeviceName ? `USB · ${bleDeviceName}` : 'Arduino USB conectado';
+      if (isConnecting) return 'Abriendo puerto USB…';
+      if (connectionStatus === 'error') return 'Error USB';
+      return 'USB desconectado';
+    }
     if (isConnected) return bleDeviceName ? `BLE · ${bleDeviceName}` : 'ESP32 BLE conectado';
     if (isConnecting) return 'Escaneando BLE…';
     if (connectionStatus === 'error') return 'Error BLE';
@@ -46,6 +53,7 @@ export function HeaderBar({
 
   const Icon = (() => {
     if (mode === 'simulator') return Radio;
+    if (mode === 'serial') return connectionStatus === 'error' ? WifiOff : Usb;
     if (isConnected) return BluetoothConnected;
     if (isConnecting) return BluetoothSearching;
     if (connectionStatus === 'error') return WifiOff;
@@ -80,7 +88,7 @@ export function HeaderBar({
           type="button"
           onClick={onOpenConnection}
           className={`gz-conn ${
-            mode === 'ble' && isConnected
+            (mode === 'ble' || mode === 'serial') && isConnected
               ? 'gz-conn--connected'
               : mode === 'simulator'
               ? 'gz-conn--demo'
@@ -88,7 +96,7 @@ export function HeaderBar({
               ? 'gz-conn--connecting'
               : 'gz-conn--offline'
           }`}
-          title="Cambiar entre Modo Demo y ESP32 BLE"
+          title="Cambiar entre Modo Demo, Cable USB (Arduino UNO) y ESP32 BLE"
         >
           <Icon size={15} />
           <span>{statusText}</span>

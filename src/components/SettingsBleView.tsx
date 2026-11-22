@@ -8,7 +8,10 @@ import {
   Cpu,
   Radio,
   RotateCcw,
+  Scale,
   Sliders,
+  Unplug,
+  Usb,
   Volume2,
 } from 'lucide-react';
 import type {
@@ -25,6 +28,7 @@ interface SettingsBleViewProps {
   connectionDetail: string;
   bleDeviceName: string | null;
   bleSupported: boolean;
+  serialSupported: boolean;
   cylinderLabel: string;
   cylinderLocation: string;
   thresholds: AlertThresholds;
@@ -35,6 +39,10 @@ interface SettingsBleViewProps {
   commandUuid: string;
   onConnectBle: () => void;
   onDisconnectBle: () => void;
+  onConnectSerial: () => void;
+  onDisconnectSerial: () => void;
+  onApplyTare: () => void;
+  onCalibrateHardware: (knownWeightKg: number) => void;
   onSwitchToSimulator: () => void;
   onUpdateCylinderMeta: (label: string, location: string) => void;
   onUpdateThresholds: (thresholds: AlertThresholds) => void;
@@ -51,6 +59,7 @@ export function SettingsBleView({
   connectionDetail,
   bleDeviceName,
   bleSupported,
+  serialSupported,
   cylinderLabel,
   cylinderLocation,
   thresholds,
@@ -61,6 +70,10 @@ export function SettingsBleView({
   commandUuid,
   onConnectBle,
   onDisconnectBle,
+  onConnectSerial,
+  onDisconnectSerial,
+  onApplyTare,
+  onCalibrateHardware,
   onSwitchToSimulator,
   onUpdateCylinderMeta,
   onUpdateThresholds,
@@ -77,7 +90,11 @@ export function SettingsBleView({
   const [svcDraft, setSvcDraft] = useState(serviceUuid);
   const [telDraft, setTelDraft] = useState(telemetryUuid);
   const [cmdDraft, setCmdDraft] = useState(commandUuid);
+  const [calibWeightDraft, setCalibWeightDraft] = useState('1.0');
   const [savedFlag, setSavedFlag] = useState(false);
+
+  const isHardwareConnected =
+    (mode === 'serial' || mode === 'ble') && connectionStatus === 'connected';
 
   useEffect(() => {
     setLabelDraft(cylinderLabel);
@@ -98,11 +115,15 @@ export function SettingsBleView({
       <section className="gz-panel">
         <div className="gz-panel-head">
           <div className="gz-title-icon">
-            <Bluetooth size={16} />
-            <h2>Modo de operación (Demo vs Hardware BLE)</h2>
+            <Usb size={16} />
+            <h2>Conexión de báscula (Cable USB · BLE · Demo)</h2>
           </div>
           <span className="gz-mono-pill">
-            {mode === 'ble' ? 'MODO HARDWARE BLE' : 'MODO DEMO / SIMULADOR'}
+            {mode === 'serial'
+              ? 'MODO CABLE USB'
+              : mode === 'ble'
+              ? 'MODO HARDWARE BLE'
+              : 'MODO DEMO / SIMULADOR'}
           </span>
         </div>
 
@@ -111,11 +132,10 @@ export function SettingsBleView({
           {bleDeviceName ? ` (${bleDeviceName})` : ''}
         </p>
 
-        {!bleSupported && (
+        {!serialSupported && (
           <div className="gz-alert gz-alert--warn">
             <span>
-              Este navegador no expone Web Bluetooth API. Para enlazar el ESP32 físico usa Chrome o
-              Edge en Windows, macOS o Android (en HTTPS o localhost).
+              Web Serial (cable USB) requiere Chrome o Edge en PC (Windows, macOS o Linux).
             </span>
           </div>
         )}
@@ -124,6 +144,27 @@ export function SettingsBleView({
           <button
             type="button"
             className="gz-btn"
+            onClick={onConnectSerial}
+            disabled={!serialSupported || connectionStatus === 'connecting'}
+          >
+            <Usb size={16} />
+            <span>
+              {mode === 'serial' && connectionStatus === 'connected'
+                ? 'Reconectar por cable USB'
+                : 'Conectar por cable USB (Arduino UNO)'}
+            </span>
+          </button>
+
+          {mode === 'serial' && connectionStatus === 'connected' ? (
+            <button type="button" className="gz-btn gz-btn--ghost" onClick={onDisconnectSerial}>
+              <Unplug size={16} />
+              <span>Desconectar USB</span>
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            className="gz-btn gz-btn--ghost"
             onClick={onConnectBle}
             disabled={!bleSupported || connectionStatus === 'connecting'}
           >
@@ -131,7 +172,7 @@ export function SettingsBleView({
             <span>
               {mode === 'ble' && connectionStatus === 'connected'
                 ? 'Reconectar ESP32 BLE'
-                : 'Escanear y conectar ESP32 (BLE)'}
+                : 'Conectar ESP32 (BLE)'}
             </span>
           </button>
 
@@ -142,13 +183,64 @@ export function SettingsBleView({
             </button>
           ) : null}
 
-          {mode === 'ble' && (
+          {mode !== 'simulator' && (
             <button type="button" className="gz-btn gz-btn--subtle" onClick={onSwitchToSimulator}>
               <Radio size={15} />
               <span>Volver a Modo Demo</span>
             </button>
           )}
         </div>
+
+        {isHardwareConnected && (
+          <>
+            <div className="gz-divider" />
+            <div className="gz-panel-head">
+              <div className="gz-title-icon">
+                <Scale size={15} />
+                <h3>Calibración rápida de la báscula (se guarda en el Arduino)</h3>
+              </div>
+            </div>
+            <p className="gz-subcopy">
+              1) Deja la báscula <strong>vacía</strong> y pulsa <strong>Poner en 0 kg</strong>. 2)
+              Coloca un objeto de peso conocido (ej. botella de 1 L = <code>1.0</code> kg o
+              garrafón de <code>10.0</code> kg), escribe su peso y pulsa <strong>Calibrar</strong>.
+            </p>
+            <div className="gz-ble-actions" style={{ alignItems: 'center' }}>
+              <button type="button" className="gz-btn gz-btn--subtle" onClick={onApplyTare}>
+                <Scale size={15} />
+                <span>1. Poner en 0 kg (Tara)</span>
+              </button>
+
+              <input
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="150"
+                value={calibWeightDraft}
+                onChange={(e) => setCalibWeightDraft(e.target.value)}
+                aria-label="Peso conocido en kilogramos"
+                style={{
+                  width: '96px',
+                  padding: '0.5rem 0.65rem',
+                  borderRadius: '10px',
+                  border: '1px solid var(--gz-border)',
+                  background: 'rgba(15, 23, 42, 0.55)',
+                  color: 'inherit',
+                  fontFamily: 'var(--gz-mono)',
+                }}
+              />
+
+              <button
+                type="button"
+                className="gz-btn"
+                onClick={() => onCalibrateHardware(Number(calibWeightDraft))}
+              >
+                <Check size={15} />
+                <span>2. Calibrar (kg)</span>
+              </button>
+            </div>
+          </>
+        )}
       </section>
 
       {/* Alertas reales: sonido y notificaciones */}

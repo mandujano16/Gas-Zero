@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GAS_ZERO_BLE } from '../constants/ble';
+import { GAS_ZERO_BLE, type BleCommandPayload } from '../constants/ble';
 import { GAS_CATALOG, TANK_PRESETS } from '../constants/gases';
 import {
   getNotificationPermission,
@@ -8,6 +8,7 @@ import {
   sendBrowserNotification,
 } from '../services/alertService';
 import { GasZeroBleClient, isWebBluetoothSupported } from '../services/bleService';
+import { GasZeroSerialClient, isWebSerialSupported } from '../services/serialService';
 import type {
   AlertLevel,
   AlertPreferences,
@@ -228,6 +229,8 @@ function loadStore(): PersistedStore {
 export function useGasZero() {
   const sessionStartRef = useRef<number>(Date.now());
   const bleClientRef = useRef<GasZeroBleClient | null>(null);
+  const serialClientRef = useRef<GasZeroSerialClient | null>(null);
+  const lastTelemetryLogMsRef = useRef<number>(0);
 
   const [store, setStore] = useState<PersistedStore>(() => loadStore());
   const [mode, setMode] = useState<DataSourceMode>('simulator');
@@ -320,17 +323,33 @@ export function useGasZero() {
     []
   );
 
-  // Limpiar BLE al desmontar
+  // Limpiar BLE y USB Serial al desmontar
   useEffect(() => {
     return () => {
       bleClientRef.current?.disconnect();
+      void serialClientRef.current?.disconnect(true);
     };
   }, []);
+
+  const sendHardwareCommand = useCallback(
+    (payload: BleCommandPayload) => {
+      if (mode === 'ble' && bleClientRef.current?.isConnected) {
+        void bleClientRef.current.sendCommand(payload);
+        return true;
+      }
+      if (mode === 'serial' && serialClientRef.current?.isConnected) {
+        void serialClientRef.current.sendCommand(payload);
+        return true;
+      }
+      return false;
+    },
+    [mode]
+  );
 
   const applyNewLevelToActive = useCallback(
     (
       nextNetRaw: number,
-      reason: 'auto' | 'sim-step' | 'sim-leak' | 'sim-slider' | 'ble',
+      reason: 'auto' | 'sim-step' | 'sim-leak' | 'sim-slider' | 'ble' | 'serial',
       overridePayload?: { weight?: number; tare?: number; gas?: GasCode; rawJson?: string }
     ) => {
       const snapshot = storeRef.current;
@@ -398,7 +417,32 @@ export function useGasZero() {
       }
 
       const addedHours =
-        reason === 'auto' ? 0.35 : reason === 'sim-step' || reason === 'sim-leak' ? 0.75 : 0.1;
+        reason === 'auto'
+          ? 0.35
+          : reason === 'sim-step' || reason === 'sim-leak'
+          ? 0.75
+          : reason === 'serial'
+          ? 0.0002
+          : 0.1;
+
+      const weightChanged = Math.abs(nextWeight - currentCyl.weightKg) >= 0.03;
+      const lastHistTs = currentCyl.history[currentCyl.history.length - 1]?.timestamp ?? 0;
+      const shouldAppendHistory =
+        reason !== 'serial' || weightChanged || now - lastHistTs >= 12000;
+
+      const nextHistory = shouldAppendHistory
+        ? [
+            ...currentCyl.history.slice(-59),
+            {
+              id: makeId(),
+              timestamp: now,
+              weightKg: nextWeight,
+              netKg: nextNet,
+              pct: nextPct,
+              gas: gasCode,
+            },
+          ]
+        : currentCyl.history;
 
       const updatedCyl: CylinderState = {
         ...currentCyl,
@@ -410,17 +454,7 @@ export function useGasZero() {
         consumedSessionKg: Number((currentCyl.consumedSessionKg + deltaConsumed).toFixed(2)),
         monitoredHours: Number((currentCyl.monitoredHours + addedHours).toFixed(2)),
         lastRawJson: rawJson,
-        history: [
-          ...currentCyl.history.slice(-59),
-          {
-            id: makeId(),
-            timestamp: now,
-            weightKg: nextWeight,
-            netKg: nextNet,
-            pct: nextPct,
-            gas: gasCode,
-          },
-        ],
+        history: nextHistory,
         events: nextEvents.slice(0, 49),
         warnNotified,
         dangerNotified,
@@ -441,6 +475,11 @@ export function useGasZero() {
         );
       } else if (reason === 'ble') {
         addLog(`BLE JSON: ${rawJson}`, 'data');
+      } else if (reason === 'serial') {
+        if (weightChanged || now - lastTelemetryLogMsRef.current >= 8000) {
+          lastTelemetryLogMsRef.current = now;
+          addLog(`USB JSON: ${rawJson}`, 'data');
+        }
       } else {
         addLog(`Lectura actualizada: ${nextWeight.toFixed(2)} kg · ${nextPct}% restante`, 'data');
       }
@@ -476,8 +515,7 @@ export function useGasZero() {
 
   // Acciones realistas vs simulación explícita
   const forceReading = useCallback(() => {
-    if (mode === 'ble' && bleClientRef.current?.isConnected) {
-      void bleClientRef.current.sendCommand({ cmd: 'READ_NOW' });
+    if (sendHardwareCommand({ cmd: 'READ_NOW' })) {
       return;
     }
     // En Modo Demo, "Forzar lectura" consulta el estado actual SIN restar gas falsamente
@@ -501,7 +539,7 @@ export function useGasZero() {
       `Lectura verificada (${activeCylinder.label}): ${activeCylinder.weightKg.toFixed(2)} kg · ${activeCylinder.pct}% (sin cambios)`,
       'data'
     );
-  }, [activeCylinder.label, activeCylinder.pct, activeCylinder.weightKg, addLog, mode, mutateActiveCylinder]);
+  }, [activeCylinder.label, activeCylinder.pct, activeCylinder.weightKg, addLog, mutateActiveCylinder, sendHardwareCommand]);
 
   const simulateConsumption = useCallback(() => {
     if (mode !== 'simulator') return;
@@ -575,9 +613,7 @@ export function useGasZero() {
 
   const applyTare = useCallback(() => {
     const now = Date.now();
-    if (mode === 'ble' && bleClientRef.current?.isConnected) {
-      void bleClientRef.current.sendCommand({ cmd: 'TARE' });
-    }
+    const sent = sendHardwareCommand({ cmd: 'TARE' });
     mutateActiveCylinder((cyl) => ({
       ...cyl,
       events: [
@@ -585,16 +621,40 @@ export function useGasZero() {
           id: makeId(),
           timestamp: now,
           type: 'tare',
-          message:
-            mode === 'ble'
-              ? 'Comando de tara enviado a báscula ESP32'
-              : `Tara verificada (${cyl.tareKg.toFixed(2)} kg)`,
+          message: sent
+            ? `Comando de tara (0 kg) enviado a la báscula (${mode === 'serial' ? 'USB' : 'BLE'})`
+            : `Tara verificada (${cyl.tareKg.toFixed(2)} kg)`,
         },
         ...cyl.events.slice(0, 48),
       ],
     }));
-    addLog(`Tara aplicada en ${activeCylinder.label}: ${activeCylinder.tareKg.toFixed(2)} kg`, 'info');
-  }, [activeCylinder.label, activeCylinder.tareKg, addLog, mode, mutateActiveCylinder]);
+    addLog(
+      sent
+        ? `Cero de báscula (TARE) enviado por ${mode === 'serial' ? 'USB' : 'BLE'}`
+        : `Tara aplicada en ${activeCylinder.label}: ${activeCylinder.tareKg.toFixed(2)} kg`,
+      'info'
+    );
+  }, [activeCylinder.label, activeCylinder.tareKg, addLog, mode, mutateActiveCylinder, sendHardwareCommand]);
+
+  const calibrateHardware = useCallback(
+    (knownWeightKg: number) => {
+      if (!Number.isFinite(knownWeightKg) || knownWeightKg <= 0.05) {
+        addLog('Ingresa un peso conocido mayor a 0.05 kg para calibrar', 'warn');
+        return false;
+      }
+      const sent = sendHardwareCommand({
+        cmd: 'CALIBRATE',
+        knownWeightKg: Number(knownWeightKg.toFixed(2)),
+      });
+      if (sent) {
+        addLog(`Calibrando báscula con peso conocido de ${knownWeightKg.toFixed(2)} kg…`, 'ble');
+      } else {
+        addLog('Conecta tu Arduino UNO (USB) o ESP32 (BLE) antes de calibrar', 'warn');
+      }
+      return sent;
+    },
+    [addLog, sendHardwareCommand]
+  );
 
   const selectGas = useCallback(
     (gasCode: GasCode) => {
@@ -624,17 +684,15 @@ export function useGasZero() {
           ],
         };
       });
-      if (mode === 'ble' && bleClientRef.current?.isConnected) {
-        void bleClientRef.current.sendCommand({
-          cmd: 'SET_CONFIG',
-          gas: gasCode,
-          tare: activeCylinder.tareKg,
-          capacity: activeCylinder.capacityKg,
-        });
-      }
+      sendHardwareCommand({
+        cmd: 'SET_CONFIG',
+        gas: gasCode,
+        tare: activeCylinder.tareKg,
+        capacity: activeCylinder.capacityKg,
+      });
       addLog(`Gas cambiado en ${activeCylinder.label}: ${gas.name} (${gas.symbol})`, 'info');
     },
-    [activeCylinder.capacityKg, activeCylinder.label, activeCylinder.tareKg, addLog, mode, mutateActiveCylinder]
+    [activeCylinder.capacityKg, activeCylinder.label, activeCylinder.tareKg, addLog, mutateActiveCylinder, sendHardwareCommand]
   );
 
   const selectTankPreset = useCallback(
@@ -672,17 +730,15 @@ export function useGasZero() {
           ],
         };
       });
-      if (mode === 'ble' && bleClientRef.current?.isConnected) {
-        void bleClientRef.current.sendCommand({
-          cmd: 'SET_CONFIG',
-          gas: activeCylinder.gasCode,
-          tare: preset.tareKg,
-          capacity: preset.capacityKg,
-        });
-      }
+      sendHardwareCommand({
+        cmd: 'SET_CONFIG',
+        gas: activeCylinder.gasCode,
+        tare: preset.tareKg,
+        capacity: preset.capacityKg,
+      });
       addLog(`Tanque ${preset.shortLabel} aplicado en ${activeCylinder.label}`, 'info');
     },
-    [activeCylinder.gasCode, activeCylinder.label, addLog, mode, mutateActiveCylinder]
+    [activeCylinder.gasCode, activeCylinder.label, addLog, mutateActiveCylinder, sendHardwareCommand]
   );
 
   const updateCustomTank = useCallback(
@@ -720,17 +776,15 @@ export function useGasZero() {
           ],
         };
       });
-      if (mode === 'ble' && bleClientRef.current?.isConnected) {
-        void bleClientRef.current.sendCommand({
-          cmd: 'SET_CONFIG',
-          gas: activeCylinder.gasCode,
-          tare: safeTare,
-          capacity: safeCap,
-        });
-      }
+      sendHardwareCommand({
+        cmd: 'SET_CONFIG',
+        gas: activeCylinder.gasCode,
+        tare: safeTare,
+        capacity: safeCap,
+      });
       addLog(`Parámetros personalizados aplicados: ${safeCap} kg / Tara ${safeTare} kg`, 'info');
     },
-    [activeCylinder.gasCode, addLog, mode, mutateActiveCylinder]
+    [activeCylinder.gasCode, addLog, mutateActiveCylinder, sendHardwareCommand]
   );
 
   // Gestión de flota multi-cilindro
@@ -793,6 +847,7 @@ export function useGasZero() {
 
   // BLE real
   const connectBle = useCallback(async () => {
+    await serialClientRef.current?.disconnect(true);
     if (!bleClientRef.current) {
       bleClientRef.current = new GasZeroBleClient();
     }
@@ -845,8 +900,86 @@ export function useGasZero() {
     setConnectionDetail('Esperando enlace BLE con ESP32');
   }, []);
 
+  // Cable USB (Web Serial API para Arduino UNO + HX711)
+  const connectSerial = useCallback(async () => {
+    bleClientRef.current?.disconnect();
+    if (!serialClientRef.current) {
+      serialClientRef.current = new GasZeroSerialClient();
+    }
+    setMode('serial');
+    setSimAutoConsume(false);
+
+    const ok = await serialClientRef.current.connect(
+      {
+        onTelemetry: (payload, rawJson) => {
+          const snapshot = storeRef.current;
+          const currentCyl =
+            snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
+            snapshot.cylinders[0];
+          const activeTare = currentCyl ? currentCyl.tareKg : payload.tare;
+          const computedNet = Math.max(0, payload.weight - activeTare);
+          applyNewLevelToActive(computedNet, 'serial', {
+            weight: payload.weight,
+            tare: activeTare,
+            gas: currentCyl ? currentCyl.gasCode : payload.gas,
+            rawJson,
+          });
+        },
+        onStatusChange: (status, detail) => {
+          setConnectionStatus(status);
+          if (detail) setConnectionDetail(detail);
+          setBleDeviceName(serialClientRef.current?.deviceName ?? null);
+          if (status === 'connected') {
+            const devName = serialClientRef.current?.deviceName ?? 'Arduino UNO (USB)';
+            mutateActiveCylinder((cyl) => ({
+              ...cyl,
+              events: [
+                {
+                  id: makeId(),
+                  timestamp: Date.now(),
+                  type: 'ble',
+                  message: `Conectado por cable USB a ${devName}`,
+                },
+                ...cyl.events.slice(0, 48),
+              ],
+            }));
+          }
+        },
+        onLog: addLog,
+      },
+      115200
+    );
+
+    // Arduino UNO se reinicia ~1.6 s al abrir el puerto USB; sincronizamos configuracion despues
+    if (ok) {
+      window.setTimeout(() => {
+        if (!serialClientRef.current?.isConnected) return;
+        const snapshot = storeRef.current;
+        const currentCyl =
+          snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
+          snapshot.cylinders[0];
+        if (currentCyl) {
+          void serialClientRef.current.sendCommand({
+            cmd: 'SET_CONFIG',
+            gas: currentCyl.gasCode,
+            tare: currentCyl.tareKg,
+            capacity: currentCyl.capacityKg,
+          });
+        }
+      }, 2000);
+    }
+  }, [addLog, applyNewLevelToActive, mutateActiveCylinder]);
+
+  const disconnectSerial = useCallback(() => {
+    void serialClientRef.current?.disconnect(false);
+    setBleDeviceName(null);
+    setConnectionStatus('disconnected');
+    setConnectionDetail('Cable USB desconectado');
+  }, []);
+
   const switchToSimulator = useCallback(() => {
     bleClientRef.current?.disconnect();
+    void serialClientRef.current?.disconnect(true);
     setBleDeviceName(null);
     setMode('simulator');
     setConnectionStatus('connected');
@@ -1013,6 +1146,7 @@ export function useGasZero() {
     connectionDetail,
     bleDeviceName,
     bleSupported: isWebBluetoothSupported(),
+    serialSupported: isWebSerialSupported(),
     notificationPermission,
     simAutoConsume,
     setSimAutoConsume,
@@ -1035,8 +1169,11 @@ export function useGasZero() {
     setSimulatedPct,
     registerRefill,
     applyTare,
+    calibrateHardware,
     connectBle,
     disconnectBle,
+    connectSerial,
+    disconnectSerial,
     switchToSimulator,
     updateThresholds,
     toggleSoundAlerts,

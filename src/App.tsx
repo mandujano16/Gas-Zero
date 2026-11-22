@@ -1,11 +1,11 @@
 import { useState, type CSSProperties } from 'react';
 import {
   BarChart3,
-  Bluetooth,
   Gauge,
   Layers,
   Lightbulb,
   Radio,
+  Usb,
 } from 'lucide-react';
 import { Esp32Console } from './components/Esp32Console';
 import { FleetView } from './components/FleetView';
@@ -25,7 +25,7 @@ const NAV_ITEMS: Array<{ id: NavTab; label: string; shortLabel: string; icon: ty
   { id: 'flota', label: 'Flota', shortLabel: 'Flota', icon: Layers },
   { id: 'historial', label: 'Historial', shortLabel: 'Historial', icon: BarChart3 },
   { id: 'ahorrar', label: 'Ahorrar gas', shortLabel: 'Ahorro', icon: Lightbulb },
-  { id: 'conexion', label: 'BLE / Ajustes', shortLabel: 'Ajustes', icon: Bluetooth },
+  { id: 'conexion', label: 'USB / BLE', shortLabel: 'Conexión', icon: Usb },
 ];
 
 export function App() {
@@ -146,12 +146,21 @@ export function App() {
           )}
 
           {gz.mode === 'simulator' && (
-            <div className="gz-simbadge">
-              <Radio size={14} />
-              <span>
-                Modo Demo activo — sin hardware ESP32 conectado. El nivel no baja solo salvo que
-                uses el Laboratorio Demo.
+            <div className="gz-simbadge" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <Radio size={14} />
+                Modo Demo activo — conecta tu Arduino UNO por cable USB para ver el peso real en vivo.
               </span>
+              {gz.serialSupported && (
+                <button
+                  type="button"
+                  className="gz-mini-btn"
+                  onClick={() => void gz.connectSerial()}
+                >
+                  <Usb size={13} />
+                  Conectar Arduino USB
+                </button>
+              )}
             </div>
           )}
 
@@ -259,6 +268,7 @@ export function App() {
               connectionDetail={gz.connectionDetail}
               bleDeviceName={gz.bleDeviceName}
               bleSupported={gz.bleSupported}
+              serialSupported={gz.serialSupported}
               cylinderLabel={cyl.label}
               cylinderLocation={cyl.location}
               thresholds={gz.settings.thresholds}
@@ -269,6 +279,10 @@ export function App() {
               commandUuid={gz.settings.commandUuid}
               onConnectBle={() => void gz.connectBle()}
               onDisconnectBle={gz.disconnectBle}
+              onConnectSerial={() => void gz.connectSerial()}
+              onDisconnectSerial={gz.disconnectSerial}
+              onApplyTare={gz.applyTare}
+              onCalibrateHardware={gz.calibrateHardware}
               onSwitchToSimulator={gz.switchToSimulator}
               onUpdateCylinderMeta={gz.updateCylinderMeta}
               onUpdateThresholds={gz.updateThresholds}

@@ -4,7 +4,7 @@ export type TankPresetId = 'small' | 'medium' | 'large' | 'industrial' | 'custom
 
 export type NavTab = 'inicio' | 'flota' | 'historial' | 'ahorrar' | 'conexion';
 
-export type DataSourceMode = 'simulator' | 'ble';
+export type DataSourceMode = 'simulator' | 'ble' | 'serial';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
