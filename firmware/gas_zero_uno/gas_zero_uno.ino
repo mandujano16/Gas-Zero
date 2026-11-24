@@ -1,24 +1,25 @@
 /*
  * ============================================================================
- *  GAS-ZERO — Firmware Arduino UNO + HX711 por Cable USB (Web Serial) v1.1.0
+ *  GAS-ZERO — Firmware Arduino UNO + HX711 + LCD 16x2 I2C (USB Web Serial) v1.2.0
  * ============================================================================
  *  Envía TODA la telemetría del Arduino en tiempo real directo al dashboard
- *  web Gas-Zero por cable USB (Chrome / Edge en PC) y opcionalmente a una
- *  pantalla LCD 16x2 I2C.
+ *  web Gas-Zero por cable USB (Chrome / Edge en PC) y la muestra en vivo en
+ *  tu pantalla LCD 16x2 I2C (detecta automáticamente dirección 0x27 o 0x3F).
  *
  *  LIBRERIAS NECESARIAS EN ARDUINO IDE:
- *   - "HX711 Arduino Library" by Bogdan Necula (obligatoria)
- *   - "LiquidCrystal I2C" by Frank de Brabander (solo si USE_LCD_I2C = 1)
+ *   - "HX711 Arduino Library" by Bogdan Necula
+ *   - "LiquidCrystal I2C" by Frank de Brabander
  *
- *  CONEXIONES PRINCIPALES (HX711 -> ARDUINO UNO):
- *   HX711 VCC  -> Arduino UNO 5V
+ *  CONEXIONES (HX711 + LCD I2C -> ARDUINO UNO):
+ *   HX711 VCC  -> Arduino UNO 5V   (compartido con LCD VCC via protoboard o empalme Y)
  *   HX711 GND  -> Arduino UNO GND
  *   HX711 DT   -> Arduino UNO Pin Digital 4
  *   HX711 SCK  -> Arduino UNO Pin Digital 5
- *
- *  OPCIONALES:
- *   - Botón físico de Tara: entre Pin Digital 2 y GND
- *   - Pantalla LCD 16x2 I2C (si USE_LCD_I2C = 1): VCC->5V, GND->GND, SDA->A4, SCL->A5
+ *   LCD   VCC  -> Arduino UNO 5V
+ *   LCD   GND  -> Arduino UNO GND
+ *   LCD   SDA  -> Arduino UNO Pin A4
+ *   LCD   SCL  -> Arduino UNO Pin A5
+ *   Botón Tara (opcional) -> entre Pin Digital 2 y GND
  * ============================================================================
  */
 
@@ -27,13 +28,14 @@
 #include <HX711.h>
 #include <math.h>
 
-// Cambia a 1 si conectas pantalla LCD 16x2 con módulo I2C (y tienes LiquidCrystal I2C instalada)
-#define USE_LCD_I2C 0
+// Pantalla LCD 16x2 I2C activada por defecto (si no esta conectada, sigue funcionando por USB)
+#define USE_LCD_I2C 1
 
 #if USE_LCD_I2C
   #include <Wire.h>
   #include <LiquidCrystal_I2C.h>
-  LiquidCrystal_I2C lcd(0x27, 16, 2); // Cambia 0x27 a 0x3F si tu escáner I2C detectó 0x3F
+  LiquidCrystal_I2C* lcd = nullptr;
+  uint8_t lcdAddr = 0;
 #endif
 
 // ==================== PINES ====================
@@ -156,22 +158,74 @@ float readWeightKg() {
 }
 
 #if USE_LCD_I2C
-void updateLcd(float weightKg, float netKg, int pct) {
-  lcd.setCursor(0, 0);
-  lcd.print(gasCode);
-  lcd.print(" ");
-  if (pct < 100) lcd.print(" ");
-  if (pct < 10) lcd.print(" ");
-  lcd.print(pct);
-  lcd.print("% ");
-  lcd.print(weightKg, 1);
-  lcd.print("kg   ");
+uint8_t detectLcdAddress() {
+  // Probar primero las dos direcciones mas comunes de pantallas LCD I2C
+  const uint8_t commonAddrs[2] = { 0x27, 0x3F };
+  for (uint8_t i = 0; i < 2; i++) {
+    Wire.beginTransmission(commonAddrs[i]);
+    if (Wire.endTransmission() == 0) {
+      return commonAddrs[i];
+    }
+  }
+  // Escaneo de respaldo en el rango tipico PCF8574 / PCF8574A
+  for (uint8_t addr = 0x20; addr <= 0x3F; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      return addr;
+    }
+  }
+  return 0;
+}
 
-  lcd.setCursor(0, 1);
-  lcd.print("Net:");
-  lcd.print(netKg, 1);
-  lcd.print("kg ");
-  lcd.print(lastHxOk ? "OK     " : "ERR HX ");
+void lcdWriteLine(uint8_t row, const char* text) {
+  if (!lcd) return;
+  char buf[17];
+  uint8_t i = 0;
+  while (i < 16 && text[i] != '\0') {
+    buf[i] = text[i];
+    i++;
+  }
+  while (i < 16) {
+    buf[i] = ' ';
+    i++;
+  }
+  buf[16] = '\0';
+  lcd->setCursor(0, row);
+  lcd->print(buf);
+}
+
+void lcdShowMessage(const char* line0, const char* line1) {
+  if (!lcd) return;
+  lcdWriteLine(0, line0);
+  lcdWriteLine(1, line1);
+}
+
+void updateLcd(float weightKg, float netKg, int pct) {
+  if (!lcd) return;
+
+  char wBuf[8];
+  char nBuf[8];
+  char line0[17];
+  char line1[17];
+
+  float clampedW = weightKg > 999.9f ? 999.9f : weightKg;
+  float clampedN = netKg > 999.9f ? 999.9f : netKg;
+  dtostrf(clampedW, 5, 1, wBuf);
+  dtostrf(clampedN, 5, 1, nBuf);
+
+  // Fila 0 (16 chars exactos): "N2  100%  32.0kg"
+  snprintf(line0, sizeof(line0), "%-3.3s %3d%% %5skg", gasCode, pct, wBuf);
+
+  // Fila 1 (16 chars exactos): "Net: 20.0kg OK  " o error HX711
+  if (!lastHxOk) {
+    snprintf(line1, sizeof(line1), "ERROR: SIN HX711");
+  } else {
+    const char* estado = (pct <= 5) ? "CRIT" : (pct <= 15) ? "BAJO" : "OK  ";
+    snprintf(line1, sizeof(line1), "Net:%5skg %s", nBuf, estado);
+  }
+
+  lcdWriteLine(0, line0);
+  lcdWriteLine(1, line1);
 }
 #endif
 
@@ -214,13 +268,24 @@ void publishTelemetry() {
 }
 
 void runTareZero() {
+#if USE_LCD_I2C
+  lcdShowMessage("  TAREANDO...   ", "Poniendo en 0 kg");
+#endif
   if (scale.wait_ready_timeout(800)) {
     scale.tare(12);
     filterInitialized = false;
     filteredWeightKg = 0.0f;
     Serial.println(F("[HX711] Cero de bascula aplicado (0.00 kg)."));
+#if USE_LCD_I2C
+    lcdShowMessage("  TARA LISTA!   ", "Peso: 0.00 kg   ");
+    delay(600);
+#endif
   } else {
     Serial.println(F("[HX711] Error: no se pudo aplicar tara (sensor no listo)."));
+#if USE_LCD_I2C
+    lcdShowMessage("  ERROR TARA    ", "Revisa HX711    ");
+    delay(800);
+#endif
   }
   publishTelemetry();
 }
@@ -235,6 +300,9 @@ void runCalibration(float knownKg) {
     return;
   }
 
+#if USE_LCD_I2C
+  lcdShowMessage(" CALIBRANDO...  ", "No muevas peso  ");
+#endif
   scale.set_scale(1.0f);
   float rawUnits = scale.get_units(15);
   if (fabsf(rawUnits) > 40.0f) {
@@ -244,9 +312,17 @@ void runCalibration(float knownKg) {
     filterInitialized = false;
     Serial.print(F("[CALIB] Exito! Nuevo factor de escala = "));
     Serial.println(scaleFactor, 2);
+#if USE_LCD_I2C
+    lcdShowMessage("CALIBRACION OK! ", "Guardado EEPROM ");
+    delay(800);
+#endif
   } else {
     scale.set_scale(scaleFactor);
     Serial.println(F("[CALIB] Error: lectura muy baja. Pon el peso conocido sobre la bascula."));
+#if USE_LCD_I2C
+    lcdShowMessage(" ERROR CALIB.   ", "Pon peso encima ");
+    delay(900);
+#endif
   }
   publishTelemetry();
 }
@@ -318,16 +394,24 @@ void setup() {
 
 #if USE_LCD_I2C
   Wire.begin();
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Gas-Zero v1.1");
-  lcd.setCursor(0, 1);
-  lcd.print("Iniciando...");
+#if defined(WIRE_HAS_TIMEOUT)
+  Wire.setWireTimeout(3000, true); // Evita bloqueos si la LCD se desconecta o falla un cable
+#endif
+  lcdAddr = detectLcdAddress();
+  if (lcdAddr != 0) {
+    lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
+    lcd->init();
+    lcd->backlight();
+    lcdShowMessage("  GAS-ZERO v1.2 ", "Iniciando sensor");
+    Serial.print(F("[LCD] Pantalla I2C detectada en 0x"));
+    Serial.println(lcdAddr, HEX);
+  } else {
+    Serial.println(F("[LCD] No detectada (revisa 5V/GND/SDA=A4/SCL=A5). Modo solo USB."));
+  }
 #endif
 
   loadConfig();
-  Serial.println(F("[UNO] Gas-Zero Arduino UNO USB v1.1 listo."));
+  Serial.println(F("[UNO] Gas-Zero Arduino UNO USB + LCD v1.2 listo."));
   Serial.print(F("[UNO] Factor actual: "));
   Serial.println(scaleFactor, 2);
 
@@ -337,9 +421,16 @@ void setup() {
     lastHxOk = true;
     scale.tare(12);
     Serial.println(F("[HX711] Sensor detectado y puesto en cero inicial."));
+#if USE_LCD_I2C
+    lcdShowMessage("  GAS-ZERO OK!  ", "Listo para pesar");
+    delay(700);
+#endif
   } else {
     lastHxOk = false;
     Serial.println(F("[HX711] ADVERTENCIA: no se detecto HX711 (revisa 5V, GND, D4, D5)."));
+#if USE_LCD_I2C
+    lcdShowMessage("  GAS-ZERO v1.2 ", "ERROR: SIN HX711");
+#endif
   }
 }
 
