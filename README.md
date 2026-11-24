@@ -8,8 +8,8 @@ Aplicación web responsiva (móvil y escritorio · PWA) en **React + TypeScript 
 
 | Documento | Para quién es | Contenido |
 |---|---|---|
-| **[Manual de Uso para Clientes](docs/MANUAL_DE_USUARIO_CLIENTE.md)** | Compradores y usuarios finales *(desde cero absoluto)* | Cómo conectar la báscula, leer el dashboard, elegir gas/tanque, tarear, calibrar, usar LCD/pilas, preguntas frecuentes y tarjeta imprimible de inicio rápido. |
-| **[Documentación Técnica Completa](docs/DOCUMENTACION_TECNICA.md)** | Desarrolladores, técnicos y fabricantes | Arquitectura completa, estructura de código, contrato JSON bidireccional, firmware UNO/ESP32, pinout, despliegue en Netlify y checklist de control de calidad. |
+| **[Manual de Uso para Clientes (PDF)](docs/Manual_de_Usuario_Gas_Zero.pdf)** · [Markdown](docs/MANUAL_DE_USUARIO_CLIENTE.md) | Compradores y usuarios finales *(desde cero absoluto)* | Cómo conectar la báscula, leer el dashboard, elegir gas/tanque, tarear, calibrar, usar LCD/pilas, preguntas frecuentes y tarjeta imprimible de inicio rápido con espacio para QR. |
+| **[Documentación Técnica Completa (PDF)](docs/Documentacion_Tecnica_Gas_Zero.pdf)** · [Markdown](docs/DOCUMENTACION_TECNICA.md) | Desarrolladores, técnicos y fabricantes | Arquitectura con diagramas, estructura de código, contrato JSON bidireccional, firmware UNO/ESP32, pinout, despliegue en Netlify y checklist de control de calidad. |
 | **[Guía de Hardware y Conexiones](firmware/GUIA_HARDWARE_Y_CONEXIONES.md)** | Armado físico paso a paso | Lista de compras (BOM), puente de Wheatstone de 4 celdas de 50 kg, pinout y subida de firmware en Arduino IDE. |
 
 ---
