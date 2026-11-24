@@ -1,39 +1,51 @@
 # Gas-Zero · Medidor Inteligente de Gases con Báscula IoT
 
-Aplicación web responsiva (móvil y escritorio · PWA) en **React + TypeScript + Vite** para monitorear cilindros industriales y medicinales de gas (`N₂`, `Ar`, `CO₂`, `O₂`, `LP`) con integración preparada para **ESP32 DevKit V1 + HX711 vía Bluetooth Low Energy (Web Bluetooth API)** y un **Simulador IoT integrado** para desarrollar sin hardware físico.
+Aplicación web responsiva (móvil y escritorio · PWA) en **React + TypeScript + Vite** para monitorear cilindros industriales, medicinales y domésticos de gas (`N₂`, `Ar`, `CO₂`, `O₂`, `LP`) conectada en tiempo real a una báscula con **Arduino UNO + HX711 vía USB (Web Serial)** o **ESP32 DevKit V1 + HX711 vía Bluetooth (Web Bluetooth BLE)**, con **Modo Demo** integrado para pruebas sin hardware.
 
-## Inicio rápido
+---
+
+## Documentación del Proyecto
+
+| Documento | Para quién es | Contenido |
+|---|---|---|
+| **[Manual de Uso para Clientes](docs/MANUAL_DE_USUARIO_CLIENTE.md)** | Compradores y usuarios finales *(desde cero absoluto)* | Cómo conectar la báscula, leer el dashboard, elegir gas/tanque, tarear, calibrar, usar LCD/pilas, preguntas frecuentes y tarjeta imprimible de inicio rápido. |
+| **[Documentación Técnica Completa](docs/DOCUMENTACION_TECNICA.md)** | Desarrolladores, técnicos y fabricantes | Arquitectura completa, estructura de código, contrato JSON bidireccional, firmware UNO/ESP32, pinout, despliegue en Netlify y checklist de control de calidad. |
+| **[Guía de Hardware y Conexiones](firmware/GUIA_HARDWARE_Y_CONEXIONES.md)** | Armado físico paso a paso | Lista de compras (BOM), puente de Wheatstone de 4 celdas de 50 kg, pinout y subida de firmware en Arduino IDE. |
+
+---
+
+## Funcionalidades principales
+
+- **Conexión Plug & Play por Cable USB (Arduino UNO) y BLE (ESP32):** enlace directo desde Chrome o Edge sin instalar software intermedio, con **auto-reconexión automática** para clientes que ya autorizaron su báscula.
+- **Monitor en tiempo real (`Monitor`):** gauge circular SVG dinámico por tipo de gas, cilindro animado, peso bruto, gas neto, tara, capacidad y autonomía estimada.
+- **Tara y calibración desde el Dashboard:** botón principal **`Tarear báscula (0 kg)`** y calibración rápida guardada permanentemente en la EEPROM del Arduino (o NVS del ESP32).
+- **Panel de Información del Arduino en vivo:** estado del sensor HX711, peso bruto/neto/tara/capacidad reportados por la placa, lectura cruda HX711, factor de calibración, contador de paquetes, tiempo encendido, JSON crudo y consola en tiempo real.
+- **Multi-cilindro (`Flota`):** alta, ubicación, seguimiento simultáneo y cambio rápido entre múltiples cilindros con resumen de alertas.
+- **Historial y exportación (`Historial`):** gráfica de barras por nivel, KPIs de consumo diario, registro de eventos y descarga a **CSV** (compatible con Excel).
+- **Alertas reales y consejos (`Ahorro`):** alertas sonoras (Web Audio API), notificaciones nativas del navegador y notas de seguridad por gas.
+- **Persistencia local automática:** toda la flota, historial y ajustes se guardan automáticamente en `localStorage`.
+
+---
+
+## Inicio rápido (Desarrollo local)
 
 ```bash
 npm install
 npm run dev
 ```
 
-Abre `http://localhost:5173` en tu navegador (Chrome o Edge recomendado para Web Bluetooth).
+Abre `http://localhost:5173` en **Chrome o Edge** (requeridos para Web Serial USB y Web Bluetooth).
 
-## Funcionalidades actuales (Fase 2: App de Producción)
+Para generar el build de producción (también usado automáticamente por Netlify vía `netlify.toml`):
 
-- **Multi-cilindro (`Flota`):** Alta, edición, ubicación, eliminación y cambio rápido entre múltiples cilindros con resumen de estado (Óptimos, Nivel bajo, Críticos) y badge de alertas activas.
-- **Monitor en tiempo real (`Monitor`):** Gauge circular SVG con brillo dinámico, cilindro animado por nivel, peso bruto/neto/tara/capacidad y cálculo de autonomía estimada.
-- **Persistencia local automática:** Todos los cilindros, historiales, eventos, recargas y ajustes se guardan automáticamente en `localStorage`.
-- **Alertas reales:** Alertas sonoras sintetizadas (Web Audio API), notificaciones nativas del navegador (Notification API) y botones de prueba de alerta.
-- **Laboratorio Demo separado de lectura real:** `Forzar lectura` consulta el nivel actual sin restar gas; las pruebas sin hardware se controlan explícitamente con slider (`0%–100%`), botones de consumo/fuga y auto-consumo opcional.
-- **Historial y analítica (`Historial`):** KPIs de consumo, gráfica interactiva de barras por nivel, línea de tiempo de eventos y exportación a **CSV**.
-- **Ahorro y seguridad (`Ahorro`):** Consejos rotativos y notas de seguridad específicas por gas (`N₂`, `Ar`, `CO₂`, `O₂`, `LP`).
-- **Conexión BLE y ajustes (`BLE / Ajustes`):** Cliente Web Bluetooth listo para enlazar el futuro ESP32, umbrales de alerta configurables y UUIDs GATT editables.
+```bash
+npm run build
+```
 
-## Firmware ESP32 + Guía de Hardware (`firmware/`)
+---
 
-- **[Guía de compras, cableado y subida a Arduino IDE](firmware/GUIA_HARDWARE_Y_CONEXIONES.md)** — Explicada desde cero (puente de Wheatstone de 4 celdas de 50 kg, pinout HX711 → ESP32 y batería 18650).
-- **[Calibrador rápido HX711](firmware/calibracion_hx711/calibracion_hx711.ino)** — Sketch de 2 minutos para obtener tu factor de escala con un peso conocido.
-- **[Firmware principal BLE GATT](firmware/gas_zero_esp32/gas_zero_esp32.ino)** — Filtro paso bajo digital, ahorro energético (`power_down` + CPU 80 MHz), memoria permanente NVS (`Preferences`), LCD 16x2 I2C opcional y servidor BLE GATT listo para esta app.
+## Firmware incluido (`firmware/`)
 
-## Contrato BLE (ESP32 ↔ App React)
-
-- **Service UUID:** `4fafc201-1fb5-459e-8fcc-c5c9c331914b`
-- **Telemetry Characteristic (Notify):** `beb5483e-36e1-4688-b7f5-ea07361b26a8`
-- **Command Characteristic (Write):** `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
-- **Payload JSON (ESP32 → App):**
-  ```json
-  {"weight": 32.0, "tare": 12.0, "net": 20.0, "pct": 100, "gas": "N2"}
-  ```
+- **[`firmware/gas_zero_uno/gas_zero_uno.ino`](firmware/gas_zero_uno/gas_zero_uno.ino)** — Firmware oficial **Arduino UNO v1.1.0** (Web Serial `115200`, JSON completo con `raw`/`factor`/`hxOk`/`uptime`, EEPROM persistente, soporte opcional para **LCD 16x2 I2C** y **botón físico de tara en Pin 2**).
+- **[`firmware/gas_zero_esp32/gas_zero_esp32.ino`](firmware/gas_zero_esp32/gas_zero_esp32.ino)** — Firmware oficial **ESP32 BLE GATT v1.0.0** (NVS persistente, ahorro de energía y LCD 16x2 I2C opcional).
+- **[`firmware/calibracion_hx711/calibracion_hx711.ino`](firmware/calibracion_hx711/calibracion_hx711.ino)** — Utilidad rápida de calibración para ESP32.
