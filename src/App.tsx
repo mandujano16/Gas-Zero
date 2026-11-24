@@ -5,6 +5,8 @@ import {
   Layers,
   Lightbulb,
   Radio,
+  Scale,
+  Unplug,
   Usb,
 } from 'lucide-react';
 import { Esp32Console } from './components/Esp32Console';
@@ -145,22 +147,50 @@ export function App() {
             </div>
           )}
 
-          {gz.mode === 'simulator' && (
+          {gz.mode === 'simulator' || gz.connectionStatus !== 'connected' ? (
             <div className="gz-simbadge" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                 <Radio size={14} />
-                Modo Demo activo — conecta tu Arduino UNO por cable USB para ver el peso real en vivo.
+                {gz.mode === 'simulator'
+                  ? 'Modo Demo — conecta tu báscula Arduino UNO por USB para ver el peso real en vivo.'
+                  : gz.connectionDetail}
               </span>
               {gz.serialSupported && (
                 <button
                   type="button"
-                  className="gz-mini-btn"
+                  className="gz-mini-btn gz-mini-btn--primary"
                   onClick={() => void gz.connectSerial()}
                 >
                   <Usb size={13} />
                   Conectar Arduino USB
                 </button>
               )}
+            </div>
+          ) : (
+            <div className="gz-livebar">
+              <span className="gz-livebar-status">
+                <span className="gz-live-dot" aria-hidden="true" />
+                <strong>{gz.bleDeviceName ?? 'Arduino UNO (USB)'}</strong>
+                <span className="gz-livebar-meta">
+                  {gz.hardwareTelemetry
+                    ? `· ${gz.hardwareTelemetry.packetCount} lecturas`
+                    : '· Esperando lecturas…'}
+                </span>
+              </span>
+              <div className="gz-livebar-actions">
+                <button type="button" className="gz-mini-btn gz-mini-btn--primary" onClick={gz.applyTare}>
+                  <Scale size={13} />
+                  Tarear (0 kg)
+                </button>
+                <button
+                  type="button"
+                  className="gz-mini-btn"
+                  onClick={gz.mode === 'serial' ? gz.disconnectSerial : gz.disconnectBle}
+                >
+                  <Unplug size={13} />
+                  Desconectar
+                </button>
+              </div>
             </div>
           )}
 
@@ -197,6 +227,7 @@ export function App() {
 
                 <QuickActions
                   mode={gz.mode}
+                  connectionStatus={gz.connectionStatus}
                   pct={cyl.pct}
                   simAutoConsume={gz.simAutoConsume}
                   simSpeed={gz.simSpeed}
@@ -209,6 +240,7 @@ export function App() {
                   onSimulateLeak={gz.simulateLeak}
                   onSetSimulatedPct={gz.setSimulatedPct}
                   onApplyTare={gz.applyTare}
+                  onCalibrateHardware={gz.calibrateHardware}
                   onRegisterRefill={gz.registerRefill}
                 />
               </div>
@@ -224,7 +256,14 @@ export function App() {
                   onUpdateCustomTank={gz.updateCustomTank}
                 />
 
-                <Esp32Console logs={gz.logs} lastRawJson={cyl.lastRawJson} />
+                <Esp32Console
+                  mode={gz.mode}
+                  connectionStatus={gz.connectionStatus}
+                  deviceName={gz.bleDeviceName}
+                  hardwareTelemetry={gz.hardwareTelemetry}
+                  logs={gz.logs}
+                  lastRawJson={cyl.lastRawJson}
+                />
               </div>
             </div>
           )}

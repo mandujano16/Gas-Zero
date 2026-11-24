@@ -39,6 +39,18 @@ export interface Esp32TelemetryPayload {
   net: number;
   pct: number;
   gas: GasCode;
+  capacity?: number;
+  raw?: number;
+  factor?: number;
+  hxOk?: boolean;
+  uptime?: number;
+}
+
+export interface HardwareTelemetrySnapshot {
+  payload: Esp32TelemetryPayload;
+  rawJson: string;
+  packetCount: number;
+  receivedAt: number;
 }
 
 export interface HistoryReading {

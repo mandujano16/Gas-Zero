@@ -19,6 +19,7 @@ import type {
   Esp32TelemetryPayload,
   GasCode,
   GasEvent,
+  HardwareTelemetrySnapshot,
   LogEntry,
   NewCylinderInput,
   TankPresetId,
@@ -239,6 +240,7 @@ export function useGasZero() {
     'Modo Demo activo · Sin hardware físico'
   );
   const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
+  const [hardwareTelemetry, setHardwareTelemetry] = useState<HardwareTelemetrySnapshot | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | 'unsupported'
   >(() => getNotificationPermission());
@@ -845,6 +847,15 @@ export function useGasZero() {
     [mutateActiveCylinder]
   );
 
+  const recordHardwarePacket = useCallback((payload: Esp32TelemetryPayload, rawJson: string) => {
+    setHardwareTelemetry((prev) => ({
+      payload,
+      rawJson,
+      packetCount: (prev?.packetCount ?? 0) + 1,
+      receivedAt: Date.now(),
+    }));
+  }, []);
+
   // BLE real
   const connectBle = useCallback(async () => {
     await serialClientRef.current?.disconnect(true);
@@ -858,6 +869,7 @@ export function useGasZero() {
     await bleClientRef.current.connect(
       {
         onTelemetry: (payload, rawJson) => {
+          recordHardwarePacket(payload, rawJson);
           applyNewLevelToActive(payload.net, 'ble', {
             weight: payload.weight,
             tare: payload.tare,
@@ -891,13 +903,79 @@ export function useGasZero() {
       telemetryUuid,
       commandUuid
     );
-  }, [addLog, applyNewLevelToActive, mutateActiveCylinder]);
+  }, [addLog, applyNewLevelToActive, mutateActiveCylinder, recordHardwarePacket]);
 
   const disconnectBle = useCallback(() => {
     bleClientRef.current?.disconnect();
     setBleDeviceName(null);
     setConnectionStatus('disconnected');
     setConnectionDetail('Esperando enlace BLE con ESP32');
+  }, []);
+
+  const createSerialCallbacks = useCallback(
+    () => ({
+      onTelemetry: (payload: Esp32TelemetryPayload, rawJson: string) => {
+        recordHardwarePacket(payload, rawJson);
+        const snapshot = storeRef.current;
+        const currentCyl =
+          snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
+          snapshot.cylinders[0];
+        const activeTare = currentCyl ? currentCyl.tareKg : payload.tare;
+        const computedNet = Math.max(0, payload.weight - activeTare);
+        applyNewLevelToActive(computedNet, 'serial', {
+          weight: payload.weight,
+          tare: activeTare,
+          gas: currentCyl ? currentCyl.gasCode : payload.gas,
+          rawJson,
+        });
+      },
+      onStatusChange: (
+        status: 'connecting' | 'connected' | 'disconnected' | 'error',
+        detail?: string
+      ) => {
+        setConnectionStatus(status);
+        if (detail) setConnectionDetail(detail);
+        setBleDeviceName(serialClientRef.current?.deviceName ?? null);
+        if (status === 'connected') {
+          setMode('serial');
+          setSimAutoConsume(false);
+          const devName = serialClientRef.current?.deviceName ?? 'Arduino UNO (USB)';
+          mutateActiveCylinder((cyl) => ({
+            ...cyl,
+            events: [
+              {
+                id: makeId(),
+                timestamp: Date.now(),
+                type: 'ble',
+                message: `Conectado por cable USB a ${devName}`,
+              },
+              ...cyl.events.slice(0, 48),
+            ],
+          }));
+        }
+      },
+      onLog: addLog,
+    }),
+    [addLog, applyNewLevelToActive, mutateActiveCylinder, recordHardwarePacket]
+  );
+
+  const scheduleSerialConfigSync = useCallback(() => {
+    // Arduino UNO se reinicia ~1.6 s al abrir el puerto USB; sincronizamos configuracion despues
+    window.setTimeout(() => {
+      if (!serialClientRef.current?.isConnected) return;
+      const snapshot = storeRef.current;
+      const currentCyl =
+        snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
+        snapshot.cylinders[0];
+      if (currentCyl) {
+        void serialClientRef.current.sendCommand({
+          cmd: 'SET_CONFIG',
+          gas: currentCyl.gasCode,
+          tare: currentCyl.tareKg,
+          capacity: currentCyl.capacityKg,
+        });
+      }
+    }, 2000);
   }, []);
 
   // Cable USB (Web Serial API para Arduino UNO + HX711)
@@ -909,66 +987,26 @@ export function useGasZero() {
     setMode('serial');
     setSimAutoConsume(false);
 
-    const ok = await serialClientRef.current.connect(
-      {
-        onTelemetry: (payload, rawJson) => {
-          const snapshot = storeRef.current;
-          const currentCyl =
-            snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
-            snapshot.cylinders[0];
-          const activeTare = currentCyl ? currentCyl.tareKg : payload.tare;
-          const computedNet = Math.max(0, payload.weight - activeTare);
-          applyNewLevelToActive(computedNet, 'serial', {
-            weight: payload.weight,
-            tare: activeTare,
-            gas: currentCyl ? currentCyl.gasCode : payload.gas,
-            rawJson,
-          });
-        },
-        onStatusChange: (status, detail) => {
-          setConnectionStatus(status);
-          if (detail) setConnectionDetail(detail);
-          setBleDeviceName(serialClientRef.current?.deviceName ?? null);
-          if (status === 'connected') {
-            const devName = serialClientRef.current?.deviceName ?? 'Arduino UNO (USB)';
-            mutateActiveCylinder((cyl) => ({
-              ...cyl,
-              events: [
-                {
-                  id: makeId(),
-                  timestamp: Date.now(),
-                  type: 'ble',
-                  message: `Conectado por cable USB a ${devName}`,
-                },
-                ...cyl.events.slice(0, 48),
-              ],
-            }));
-          }
-        },
-        onLog: addLog,
-      },
-      115200
-    );
-
-    // Arduino UNO se reinicia ~1.6 s al abrir el puerto USB; sincronizamos configuracion despues
+    const ok = await serialClientRef.current.connect(createSerialCallbacks(), 115200);
     if (ok) {
-      window.setTimeout(() => {
-        if (!serialClientRef.current?.isConnected) return;
-        const snapshot = storeRef.current;
-        const currentCyl =
-          snapshot.cylinders.find((c) => c.id === snapshot.activeCylinderId) ??
-          snapshot.cylinders[0];
-        if (currentCyl) {
-          void serialClientRef.current.sendCommand({
-            cmd: 'SET_CONFIG',
-            gas: currentCyl.gasCode,
-            tare: currentCyl.tareKg,
-            capacity: currentCyl.capacityKg,
-          });
-        }
-      }, 2000);
+      scheduleSerialConfigSync();
     }
-  }, [addLog, applyNewLevelToActive, mutateActiveCylinder]);
+  }, [createSerialCallbacks, scheduleSerialConfigSync]);
+
+  // Auto-reconexión silenciosa para clientes que ya autorizaron su Arduino USB antes
+  const autoConnectAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoConnectAttemptedRef.current || !isWebSerialSupported()) return;
+    autoConnectAttemptedRef.current = true;
+    if (!serialClientRef.current) {
+      serialClientRef.current = new GasZeroSerialClient();
+    }
+    void serialClientRef.current.autoReconnect(createSerialCallbacks(), 115200).then((ok) => {
+      if (ok) {
+        scheduleSerialConfigSync();
+      }
+    });
+  }, [createSerialCallbacks, scheduleSerialConfigSync]);
 
   const disconnectSerial = useCallback(() => {
     void serialClientRef.current?.disconnect(false);
@@ -981,6 +1019,7 @@ export function useGasZero() {
     bleClientRef.current?.disconnect();
     void serialClientRef.current?.disconnect(true);
     setBleDeviceName(null);
+    setHardwareTelemetry(null);
     setMode('simulator');
     setConnectionStatus('connected');
     setConnectionDetail('Modo Demo activo · Sin hardware físico');
@@ -1145,6 +1184,7 @@ export function useGasZero() {
     connectionStatus,
     connectionDetail,
     bleDeviceName,
+    hardwareTelemetry,
     bleSupported: isWebBluetoothSupported(),
     serialSupported: isWebSerialSupported(),
     notificationPermission,

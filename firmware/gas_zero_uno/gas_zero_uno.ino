@@ -1,18 +1,24 @@
 /*
  * ============================================================================
- *  GAS-ZERO — Firmware Arduino UNO + HX711 por Cable USB (Web Serial) v1.0.0
+ *  GAS-ZERO — Firmware Arduino UNO + HX711 por Cable USB (Web Serial) v1.1.0
  * ============================================================================
- *  Sin necesidad de pantalla LCD: envia el peso real en tiempo real directo al
- *  dashboard de la App Web Gas-Zero por el cable USB (Chrome / Edge en PC).
+ *  Envía TODA la telemetría del Arduino en tiempo real directo al dashboard
+ *  web Gas-Zero por cable USB (Chrome / Edge en PC) y opcionalmente a una
+ *  pantalla LCD 16x2 I2C.
  *
- *  LIBRERIA NECESARIA EN ARDUINO IDE:
- *   - "HX711 Arduino Library" by Bogdan Necula (Gestor de Bibliotecas)
+ *  LIBRERIAS NECESARIAS EN ARDUINO IDE:
+ *   - "HX711 Arduino Library" by Bogdan Necula (obligatoria)
+ *   - "LiquidCrystal I2C" by Frank de Brabander (solo si USE_LCD_I2C = 1)
  *
- *  CONEXIONES (SOLO 4 CABLES ENTRE HX711 Y ARDUINO UNO):
+ *  CONEXIONES PRINCIPALES (HX711 -> ARDUINO UNO):
  *   HX711 VCC  -> Arduino UNO 5V
  *   HX711 GND  -> Arduino UNO GND
  *   HX711 DT   -> Arduino UNO Pin Digital 4
  *   HX711 SCK  -> Arduino UNO Pin Digital 5
+ *
+ *  OPCIONALES:
+ *   - Botón físico de Tara: entre Pin Digital 2 y GND
+ *   - Pantalla LCD 16x2 I2C (si USE_LCD_I2C = 1): VCC->5V, GND->GND, SDA->A4, SCL->A5
  * ============================================================================
  */
 
@@ -21,9 +27,19 @@
 #include <HX711.h>
 #include <math.h>
 
-// ==================== PINES HX711 ====================
+// Cambia a 1 si conectas pantalla LCD 16x2 con módulo I2C (y tienes LiquidCrystal I2C instalada)
+#define USE_LCD_I2C 0
+
+#if USE_LCD_I2C
+  #include <Wire.h>
+  #include <LiquidCrystal_I2C.h>
+  LiquidCrystal_I2C lcd(0x27, 16, 2); // Cambia 0x27 a 0x3F si tu escáner I2C detectó 0x3F
+#endif
+
+// ==================== PINES ====================
 const uint8_t PIN_HX711_DOUT = 4;
 const uint8_t PIN_HX711_SCK  = 5;
+const uint8_t PIN_BTN_TARE   = 2; // Botón opcional de tara física (conectar a GND)
 
 // ==================== PARAMETROS DE LECTURA ====================
 const uint8_t  HX_SAMPLES        = 6;     // Promedio por lectura HX711
@@ -48,9 +64,12 @@ float cylinderTareKg    = 12.0f;
 float capacityKg        = 20.0f;
 char  gasCode[5]        = "N2";
 
-float filteredWeightKg  = 0.0f;
-bool  filterInitialized = false;
-uint32_t lastSendMs     = 0;
+float    filteredWeightKg  = 0.0f;
+bool     filterInitialized = false;
+bool     lastHxOk          = false;
+long     lastRawValue      = 0;
+uint32_t lastSendMs        = 0;
+uint32_t lastBtnTareMs     = 0;
 
 String serialLineBuf    = "";
 
@@ -114,8 +133,12 @@ bool extractJsonString(const String& json, const char* key, String& outStr) {
 float readWeightKg() {
   float rawKg = filteredWeightKg;
   if (scale.wait_ready_timeout(400)) {
-    rawKg = scale.get_units(HX_SAMPLES);
+    lastHxOk = true;
+    double rawDelta = scale.get_value(HX_SAMPLES);
+    lastRawValue = (long)rawDelta;
+    rawKg = (float)(rawDelta / (double)scaleFactor);
   } else {
+    lastHxOk = false;
     Serial.println(F("[HX711] Aviso: sensor no respondio. Revisa 5V/GND/D4/D5."));
   }
 
@@ -132,6 +155,26 @@ float readWeightKg() {
   return roundf(filteredWeightKg * 100.0f) / 100.0f;
 }
 
+#if USE_LCD_I2C
+void updateLcd(float weightKg, float netKg, int pct) {
+  lcd.setCursor(0, 0);
+  lcd.print(gasCode);
+  lcd.print(" ");
+  if (pct < 100) lcd.print(" ");
+  if (pct < 10) lcd.print(" ");
+  lcd.print(pct);
+  lcd.print("% ");
+  lcd.print(weightKg, 1);
+  lcd.print("kg   ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Net:");
+  lcd.print(netKg, 1);
+  lcd.print("kg ");
+  lcd.print(lastHxOk ? "OK     " : "ERR HX ");
+}
+#endif
+
 void publishTelemetry() {
   float weightKg = readWeightKg();
   float netKg = weightKg - cylinderTareKg;
@@ -142,7 +185,11 @@ void publishTelemetry() {
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
 
-  // Linea JSON exacta esperada por Gas-Zero Web App
+#if USE_LCD_I2C
+  updateLcd(weightKg, netKg, pct);
+#endif
+
+  // Linea JSON completa consumida por el Dashboard Web Gas-Zero
   Serial.print(F("{\"weight\":"));
   Serial.print(weightKg, 2);
   Serial.print(F(",\"tare\":"));
@@ -153,7 +200,17 @@ void publishTelemetry() {
   Serial.print(pct);
   Serial.print(F(",\"gas\":\""));
   Serial.print(gasCode);
-  Serial.println(F("\"}"));
+  Serial.print(F("\",\"capacity\":"));
+  Serial.print(capacityKg, 2);
+  Serial.print(F(",\"raw\":"));
+  Serial.print(lastRawValue);
+  Serial.print(F(",\"factor\":"));
+  Serial.print(scaleFactor, 2);
+  Serial.print(F(",\"hxOk\":"));
+  Serial.print(lastHxOk ? F("true") : F("false"));
+  Serial.print(F(",\"uptime\":"));
+  Serial.print(millis() / 1000UL);
+  Serial.println(F("}"));
 }
 
 void runTareZero() {
@@ -257,17 +314,31 @@ void setup() {
   Serial.begin(115200);
   delay(250);
 
+  pinMode(PIN_BTN_TARE, INPUT_PULLUP);
+
+#if USE_LCD_I2C
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Gas-Zero v1.1");
+  lcd.setCursor(0, 1);
+  lcd.print("Iniciando...");
+#endif
+
   loadConfig();
-  Serial.println(F("[UNO] Gas-Zero Arduino UNO USB v1.0 listo."));
+  Serial.println(F("[UNO] Gas-Zero Arduino UNO USB v1.1 listo."));
   Serial.print(F("[UNO] Factor actual: "));
   Serial.println(scaleFactor, 2);
 
   scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
   scale.set_scale(scaleFactor);
   if (scale.wait_ready_timeout(1200)) {
+    lastHxOk = true;
     scale.tare(12);
     Serial.println(F("[HX711] Sensor detectado y puesto en cero inicial."));
   } else {
+    lastHxOk = false;
     Serial.println(F("[HX711] ADVERTENCIA: no se detecto HX711 (revisa 5V, GND, D4, D5)."));
   }
 }
@@ -286,6 +357,14 @@ void loop() {
   }
 
   uint32_t now = millis();
+
+  // Boton fisico opcional de tara (pin 2 a GND) con antirrebote de 1.2 s
+  if (digitalRead(PIN_BTN_TARE) == LOW && (now - lastBtnTareMs > 1200)) {
+    lastBtnTareMs = now;
+    Serial.println(F("[BTN] Tara fisica solicitada."));
+    runTareZero();
+  }
+
   if (now - lastSendMs >= TELEMETRY_MS) {
     lastSendMs = now;
     publishTelemetry();

@@ -1807,3 +1807,132 @@ input:focus {
   flex-wrap: wrap;
   gap: 10px;
 }
+
+/* ==================== LIVE ARDUINO BAR & TELEMETRY GRID ==================== */
+
+.gz-livebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 13px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ok) 10%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent);
+  font-size: 12.5px;
+}
+
+.gz-livebar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-primary);
+}
+
+.gz-livebar-meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.gz-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 10px var(--ok);
+  animation: gz-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes gz-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
+}
+
+.gz-livebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.gz-mini-btn--primary {
+  color: #08060f;
+  font-weight: 600;
+  background: var(--gas-accent);
+  border-color: var(--gas-accent);
+}
+
+.gz-mini-btn--primary:hover {
+  color: #08060f;
+  opacity: 0.92;
+}
+
+.gz-calib-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.gz-calib-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.gz-hw-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+}
+
+.gz-hw-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.gz-hw-item--wide {
+  grid-column: 1 / -1;
+}
+
+.gz-hw-label {
+  font-size: 10.5px;
+  color: var(--text-label);
+}
+
+.gz-hw-val {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gz-hw-val.is-live {
+  color: var(--ok);
+}
+
+.gz-hw-val.is-err {
+  color: var(--danger);
+}
+

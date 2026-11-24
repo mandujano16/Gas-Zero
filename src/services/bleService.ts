@@ -36,12 +36,30 @@ export function parseEsp32Json(raw: string): Esp32TelemetryPayload | null {
       return null;
     }
 
+    const capacity = parsed.capacity !== undefined ? Number(parsed.capacity) : undefined;
+    const rawVal = parsed.raw !== undefined ? Number(parsed.raw) : undefined;
+    const factor = parsed.factor !== undefined ? Number(parsed.factor) : undefined;
+    const uptime = parsed.uptime !== undefined ? Number(parsed.uptime) : undefined;
+    const hxOk =
+      typeof parsed.hxOk === 'boolean'
+        ? parsed.hxOk
+        : parsed.hxOk === 1 || parsed.hxOk === '1'
+        ? true
+        : parsed.hxOk === 0 || parsed.hxOk === '0'
+        ? false
+        : undefined;
+
     return {
       weight: Math.max(0, weight),
       tare: Math.max(0, tare),
       net: Math.max(0, net),
       pct: Math.min(100, Math.max(0, Math.round(pct))),
       gas: VALID_GASES.has(gas) ? gas : 'N2',
+      ...(capacity !== undefined && Number.isFinite(capacity) ? { capacity: Math.max(0, capacity) } : {}),
+      ...(rawVal !== undefined && Number.isFinite(rawVal) ? { raw: Math.round(rawVal) } : {}),
+      ...(factor !== undefined && Number.isFinite(factor) ? { factor } : {}),
+      ...(hxOk !== undefined ? { hxOk } : {}),
+      ...(uptime !== undefined && Number.isFinite(uptime) ? { uptime: Math.max(0, Math.round(uptime)) } : {}),
     };
   } catch {
     return null;

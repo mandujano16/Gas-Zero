@@ -46,6 +46,49 @@ export class GasZeroSerialClient {
     return this.connected && this.port !== null;
   }
 
+  private async openPort(
+    port: SerialPort,
+    callbacks: SerialCallbacks,
+    baudRate: number
+  ): Promise<boolean> {
+    await port.open({ baudRate });
+
+    this.port = port;
+    this.label = formatPortLabel(port);
+    this.connected = true;
+    this.rxBuffer = '';
+
+    callbacks.onStatusChange('connected', `${this.label} · ${baudRate} baudios`);
+    callbacks.onLog(`Conectado por cable USB a ${this.label} (${baudRate} baudios)`, 'ble');
+
+    void this.readLoop(port);
+    return true;
+  }
+
+  async autoReconnect(callbacks: SerialCallbacks, baudRate = 115200): Promise<boolean> {
+    if (!isWebSerialSupported() || !navigator.serial || this.connected) {
+      return false;
+    }
+
+    try {
+      const ports = await navigator.serial.getPorts();
+      if (!ports.length) return false;
+
+      this.callbacks = callbacks;
+      this.closing = false;
+      for (const port of ports) {
+        try {
+          return await this.openPort(port, callbacks, baudRate);
+        } catch {
+          // Intentar con el siguiente puerto autorizado si el primero está ocupado o desconectado
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   async connect(callbacks: SerialCallbacks, baudRate = 115200): Promise<boolean> {
     this.callbacks = callbacks;
 
@@ -69,18 +112,7 @@ export class GasZeroSerialClient {
       callbacks.onLog('Solicitando puerto USB (Web Serial)…', 'ble');
 
       const port = await navigator.serial.requestPort();
-      await port.open({ baudRate });
-
-      this.port = port;
-      this.label = formatPortLabel(port);
-      this.connected = true;
-      this.rxBuffer = '';
-
-      callbacks.onStatusChange('connected', `${this.label} · ${baudRate} baudios`);
-      callbacks.onLog(`Conectado por cable USB a ${this.label} (${baudRate} baudios)`, 'ble');
-
-      void this.readLoop(port);
-      return true;
+      return await this.openPort(port, callbacks, baudRate);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Error al abrir el puerto USB';
       const friendly = message.toLowerCase().includes('no port selected')
